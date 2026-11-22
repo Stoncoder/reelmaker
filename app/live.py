@@ -336,3 +336,53 @@ def still_live(s: dict) -> bool:
         return bool(d.get("is_live") or d.get("live_status") == "is_live")
     except Exception:
         return True      # a network hiccup isn't the end of the stream; the next check decides
+
+
+# ------------------------------------------------------------------ scheduled (upcoming) streams
+
+_soon: dict = {"t": 0, "data": None}
+
+
+def _upcoming_for(creator: dict) -> list[dict]:
+    """Scheduled streams on a creator's YouTube channel (its Streams tab lists them first)."""
+    import yt_dlp
+    handle = (creator.get("youtube") or "").strip()
+    if not handle:
+        return []
+    h = handle if handle.startswith(("@", "channel/", "c/")) else "@" + handle
+    try:
+        with yt_dlp.YoutubeDL({**Q, "extract_flat": True, "playlist_items": "1:6"}) as y:
+            tab = y.extract_info(f"https://www.youtube.com/{h}/streams", download=False)
+    except Exception:
+        return []
+    out = []
+    for e in tab.get("entries") or []:
+        if e.get("live_status") != "is_upcoming" or not e.get("id"):
+            continue
+        url = f"https://www.youtube.com/watch?v={e['id']}"
+        starts, thumb, title = None, None, e.get("title") or ""
+        try:
+            with yt_dlp.YoutubeDL({**Q, "noplaylist": True, "ignore_no_formats_error": True}) as y:
+                d = y.extract_info(url, download=False, process=False)
+            starts, thumb, title = d.get("release_timestamp"), d.get("thumbnail"), d.get("fulltitle") or d.get("title") or title
+        except Exception:
+            pass
+        if starts and starts < time.time() - 6 * 3600:
+            continue                 # long overdue "upcoming" placeholders (some channels leave them up for months)
+        out.append({"creator": creator.get("name") or handle, "platform": "youtube", "title": title, "starts": starts,
+                    "thumbnail": thumb or ((e.get("thumbnails") or [{}])[-1].get("url")), "watch_url": url})
+    return out
+
+
+def upcoming(refresh: bool = False) -> dict:
+    """Your creators' scheduled YouTube streams, soonest first. Cached 10 minutes; only runs when asked."""
+    if not refresh and _soon["data"] and time.time() - _soon["t"] < 600:
+        return _soon["data"]
+    cs = [c for c in creators() if c.get("youtube")]
+    with ThreadPoolExecutor(min(8, max(1, len(cs)))) as ex:
+        res = [s for lst in ex.map(_upcoming_for, cs) for s in lst]
+    res.sort(key=lambda s: s.get("starts") or 9e12)
+    data = {"streams": res, "checked_at": time.time(),
+            "note": "Scheduled streams come from YouTube. Twitch and Kick don't publish schedules this app can read."}
+    _soon.update(t=time.time(), data=data)
+    return data

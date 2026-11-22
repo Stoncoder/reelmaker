@@ -659,6 +659,12 @@ def api_live_now(refresh: bool = False):
     return live.live_now(refresh)
 
 
+@app.get("/api/live/upcoming")
+def api_live_upcoming(refresh: bool = False):
+    """Your creators' scheduled streams (YouTube). Only runs when the Live tab asks."""
+    return live.upcoming(refresh)
+
+
 @app.get("/api/live/creators")
 def api_live_creators():
     return {"creators": live.creators(), "defaults": live.DEFAULT_CREATORS}
@@ -674,6 +680,7 @@ def api_set_live_creators(body: dict = Body(...)):
             out.append({"name": name, **{k: v for k, v in row.items() if v}})
     save_settings(live_creators=out or None)
     live._now.update(t=0, data=None)
+    live._soon.update(t=0, data=None)
     return {"creators": live.creators()}
 
 
@@ -965,6 +972,15 @@ def _watch_scan(d: Path, src: dict, a: float, b: float, count: int, creator: str
         media.CTX.report = None
 
 
+def _same_video(a: str | None, b: str | None) -> bool:
+    """youtu.be/ID, youtube.com/watch?v=ID and youtube.com/live/ID are the same stream."""
+    import re as _re
+    def vid(u):
+        m = _re.search(r"(?:youtu\.be/|[?&]v=|/live/)([\w-]{11})", u or "")
+        return m.group(1) if m else (u or "").split("?")[0]
+    return bool(a and b) and vid(a) == vid(b)
+
+
 def start_watcher(wid: str):
     import threading as _th
     WATCHERS[wid] = {"stop": _th.Event(), "awake": None}
@@ -993,7 +1009,8 @@ def api_watch_start(body: dict = Body(...)):
         raise HTTPException(400, "That stream can't be clipped (no recording of it is available).")
     for wid, w in WATCHERS.items():
         o = load(watch_dir() / wid).get("stream", {})
-        if (st.get("clip_url") and o.get("clip_url") == st["clip_url"]) or (waiting and o.get("watch_url") == st["watch_url"]):
+        if (st.get("clip_url") and o.get("clip_url") == st["clip_url"]) or \
+                (waiting and _same_video(o.get("watch_url"), st["watch_url"])):
             raise HTTPException(409, "This stream is already being auto-clipped.")
     day = body.get("day") or ""
     if not day or not (reels_root() / day).is_dir():

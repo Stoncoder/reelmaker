@@ -1509,6 +1509,7 @@ async function openLive(refresh = false) {
   } finally { $("#liveRefresh").disabled = false; }
   if (LV.search) pollSearch();
   loadWatchers();
+  loadUpcoming(refresh);
 }
 function drawLive(r) {
   const grid = $("#liveGrid"); grid.innerHTML = "";
@@ -1668,4 +1669,39 @@ async function loadWatchers() {
       last ? h("div", { class: "hint small" }, last.slice(9)) : null));
   }
   if (r.watchers.some((w) => w.running)) LV.wpoll = setTimeout(loadWatchers, 5000);
+}
+
+/* Live tab ▸ Coming up: scheduled streams from your creators' YouTube channels */
+function whenText(t) {
+  if (!t) return "time not announced";
+  const d = new Date(t * 1000), now = new Date(), mins = Math.round((t * 1000 - now) / 60000);
+  const day = d.toDateString() === now.toDateString() ? "Today" :
+    d.toDateString() === new Date(now.getTime() + 864e5).toDateString() ? "Tomorrow" : d.toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" });
+  const at = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const rel = mins <= 0 ? "starting any minute" : mins < 60 ? `in ${mins} min` : mins < 48 * 60 ? `in ${Math.floor(mins / 60)} h ${mins % 60} min` : "";
+  return `${day} ${at}` + (rel ? ` · ${rel}` : "");
+}
+async function loadUpcoming(refresh = false) {
+  const grid = $("#soonGrid");
+  const [r, w] = await Promise.all([api("GET", "/api/live/upcoming" + (refresh ? "?refresh=1" : "")).catch(() => null),
+                                    api("GET", "/api/live/watch").catch(() => ({ watchers: [] }))]);
+  if (!r) { grid.innerHTML = '<p class="hint">Couldn\'t check scheduled streams right now.</p>'; return; }
+  $("#soonNote").textContent = "— " + r.note;
+  const vid = (u) => ((u || "").match(/(?:youtu\.be\/|[?&]v=|\/live\/)([\w-]{11})/) || [])[1] || u;
+  const set = new Set(w.watchers.filter((x) => x.running).flatMap((x) => [vid(x.stream && x.stream.watch_url), vid(x.stream && x.stream.clip_url)]));
+  grid.innerHTML = "";
+  if (!r.streams.length) grid.append(h("p", { class: "hint" }, "No scheduled streams from your creators right now."));
+  for (const s of r.streams) {
+    const armed = set.has(vid(s.watch_url));
+    grid.append(h("div", { class: "liveCard" },
+      h("div", { class: "lcThumb" }, s.thumbnail ? h("img", { src: s.thumbnail, alt: "", loading: "lazy", onerror: (e) => e.target.remove() }) : null,
+        h("span", { class: "lcLive soon" }, "SCHEDULED"), h("span", { class: "lcPlat youtube" }, "YouTube")),
+      h("b", {}, s.creator),
+      h("div", { class: "lcTitle" }, s.title),
+      h("div", { class: "hint" }, "🗓 " + whenText(s.starts)),
+      h("div", { class: "row" },
+        armed ? h("span", { class: "badge ok" }, "✓ Auto-clip is set — starts by itself")
+          : h("button", { class: "small primary", onclick: async () => { await startWatch({ url: s.watch_url }); loadUpcoming(); } }, "🤖 Auto-clip when it starts"),
+        h("a", { class: "ghost small linkbtn", href: s.watch_url, target: "_blank", rel: "noopener" }, "Open ↗"))));
+  }
 }
