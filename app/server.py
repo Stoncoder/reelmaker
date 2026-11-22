@@ -13,7 +13,7 @@ from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import ai, analysis, media, render, story, system
+from . import ai, analysis, live, media, render, story, system
 from .config import (APP_DIR, DEFAULT_VOICE, OLLAMA_MODEL, PRESETS_FILE, VOICES, fmt_time, parse_ranges,
                      read_json, reels_root, safe_name, save_settings, settings, slug, write_json)
 
@@ -251,6 +251,9 @@ def full_scan(d: Path, src: dict, win: dict | None = None) -> dict:
     from .config import DATA_DIR
     cdir = DATA_DIR / "cache" / source_key(src)
     cdir.mkdir(parents=True, exist_ok=True)
+    if src.get("live") and not win:       # a running stream has no end yet: search everything streamed so far
+        win = {"start": 0.0, "end": max(60.0, live.head_seconds(src["url"]) - 10)}
+        log(d, f"Live stream: searching everything streamed so far (0:00–{fmt_time(win['end'])}).")
     tag = f"-{int(win['start'])}-{int(win['end'])}" if win else ""
     scan = read_json(cdir / f"scan{tag}.json", {})
     if scan.get("done"):
@@ -262,7 +265,10 @@ def full_scan(d: Path, src: dict, win: dict | None = None) -> dict:
             tmp = cdir / f"window{tag}-dl.mp4"
             tmp.unlink(missing_ok=True)
             stage(d, "locate", span=(0.0, 0.35))
-            if src["type"] == "youtube":
+            if src.get("live"):
+                log(d, f"Downloading a small 360p copy of {fmt_time(a)}–{fmt_time(b)} from the live stream to search in…")
+                live.fetch(src["url"], a, b, tmp, max_height=360, label="Downloading a 360p search copy")
+            elif src["type"] == "youtube":
                 log(d, f"Downloading a small 360p copy of {fmt_time(a)}–{fmt_time(b)} to search in…")
                 # 360p is roughly 60 KB/s of video+audio: lets the bar move even though yt-dlp can't size a section
                 media.ytdlp_download([media.tool("yt-dlp"), "--no-playlist", "-f", "bv*[height<=360]+ba/b[height<=360]/wa*+ba/b",
@@ -354,12 +360,11 @@ def pipeline(d: Path):
             try:
                 meta = media.youtube_meta(src["url"])
                 src.update(title=meta["title"], channel=meta["channel"], video_id=meta["id"])
-                if meta["is_live"]:
-                    raise media.MediaError("This is a live stream that's still running — wait until it ends.")
+                if meta["is_live"] and "youtu" in src["url"]:
+                    src["live"] = True
+                    log(d, "This is a live stream that's still running — clipping straight from it (anything already streamed can be fetched).")
                 update(d, source=src)
             except media.MediaError as e:
-                if "live stream" in str(e):
-                    raise
                 log(d, f"Couldn't read video details ({str(e).splitlines()[-1][:120]}); trying the download anyway.")
         scan = None
         if not p.get("ranges"):
@@ -380,7 +385,11 @@ def pipeline(d: Path):
         for i, r in enumerate(p["ranges"]):
             stage(d, "fetch", span=(i / nr, (i + 1) / nr))
             dst = src_dir / f"piece-{i + 1}.mp4"
-            if src["type"] == "youtube":  # full quality, just this section (the scan copy is only 360p)
+            if src.get("live"):           # a stream that's still running: fetch just its segments
+                a0, b0 = max(0.0, r["start"] - media.PAD), r["end"] + media.PAD
+                log(d, f"Fetching {fmt_time(a0)}–{fmt_time(b0)} straight from the live stream…")
+                info = live.fetch(src["url"], a0, b0, dst)
+            elif src["type"] == "youtube":  # full quality, just this section (the scan copy is only 360p)
                 info = media.fetch_youtube_piece(src["url"], r["start"], r["end"], dst, lambda m: log(d, m))
             else:
                 log(d, f"Cutting {fmt_time(r['start'])}–{fmt_time(r['end'])} (+ padding) from your file…")
@@ -627,6 +636,136 @@ recover_interrupted()
 
 
 # ------------------------------------------------------------------ API: days & settings
+
+# ------------------------------------------------------------------ Live tab: who's live, find moments, approve
+
+LIVE_DIR = None
+
+
+def live_dir() -> Path:
+    from .config import DATA_DIR
+    d = DATA_DIR / "live-search"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+@app.get("/api/live/now")
+def api_live_now(refresh: bool = False):
+    """Only runs when you open the Live tab or click Refresh — never in the background."""
+    return live.live_now(refresh)
+
+
+@app.get("/api/live/creators")
+def api_live_creators():
+    return {"creators": live.creators(), "defaults": live.DEFAULT_CREATORS}
+
+
+@app.put("/api/live/creators")
+def api_set_live_creators(body: dict = Body(...)):
+    out = []
+    for c in (body.get("creators") or [])[:60]:
+        name = str(c.get("name") or "").strip()[:40]
+        row = {k: str(c.get(k) or "").strip()[:80] for k in live.PLATFORMS}
+        if name and any(row.values()):
+            out.append({"name": name, **{k: v for k, v in row.items() if v}})
+    save_settings(live_creators=out or None)
+    live._now.update(t=0, data=None)
+    return {"creators": live.creators()}
+
+
+def live_search(d: Path):
+    """Scan the last part of a live stream and suggest the best moments (nothing is clipped until you approve)."""
+    media.CTX.tag = rid(d)
+    media.CTX.report = lambda info: report(d, info)
+    media.CANCELLED.discard(rid(d))
+    try:
+        p = load(d)
+        st = p["stream"]
+        set_job(d, progress=0.0, task=None, span=None, started=time.time(),
+                plan={"locate": (0.0, 0.9), "cut": (0.9, 1.0)})
+        stage(d, "locate")
+        update(d, state="locating", error=None)
+        head = live.stream_position(st)
+        a = 0.0 if not p["minutes"] else max(0.0, head - p["minutes"] * 60)
+        b = max(a + 60, head - 15)
+        log(d, f"{st['creator']} is {fmt_time(head)} into the stream. Searching {fmt_time(a)}–{fmt_time(b)}…")
+        src = {"type": "youtube", "url": st["clip_url"], "live": st["platform"] == "youtube"}
+        scan = full_scan(d, src, {"start": a, "end": b})
+        stage(d, "cut")
+        log(d, "Picking the best moments (local AI)…")
+        found = story.locate(scan["words"], scan["profile"], scan["motion"], scan["duration"], [], p["count"],
+                             st["creator"], p.get("target") or 0)
+        off = scan.get("offset", 0.0)
+        for i, c in enumerate(found):
+            c["start"] = round(c["start"] + off, 1); c["end"] = round(c["end"] + off, 1)
+            c["said"] = " ".join(w["w"] for w in scan["words"] if c["start"] <= w["s"] + off < c["end"])[:400]
+            c["id"] = i
+        update(d, state="ready", moments=found, searched=[a, b])
+        log(d, f"Found {len(found)} moment{'s' if len(found) != 1 else ''}. Tick the ones you want and click Make reels.")
+        set_job(d, stage="ready", progress=1.0, task=None, span=None)
+    except Exception as e:
+        cancelled = isinstance(e, media.Cancelled) or rid(d) in media.CANCELLED
+        if not cancelled:
+            traceback.print_exc()
+        update(d, state="error", error="Cancelled." if cancelled else str(e)[:2000])
+        log(d, "Cancelled." if cancelled else "Stopped: " + str(e).splitlines()[0][:200])
+        set_job(d, stage="error", progress=0, task=None, span=None)
+    finally:
+        media.CTX.tag = None
+        media.CTX.report = None
+
+
+@app.post("/api/live/search")
+def api_live_search(body: dict = Body(...)):
+    st = body.get("stream") or {}
+    if not st.get("clip_url"):
+        raise HTTPException(400, "This stream can't be clipped (no recording available).")
+    sid = time.strftime("%Y%m%d-%H%M%S") + "-" + analysis.uid()[:4]
+    d = live_dir() / sid
+    d.mkdir()
+    keep = {k: st.get(k) for k in ("creator", "platform", "handle", "title", "clip_url", "watch_url", "thumbnail")}
+    save(d, {"stream": keep, "minutes": int(body.get("minutes") or 0), "count": int(min(10, max(1, int(body.get("count") or 3)))),
+             "target": int(body.get("target") or 0), "state": "queued", "log": [], "created": time.time()})
+    set_job(d, stage="queued", progress=0)
+    PIPE.submit(live_search, d)
+    return {"id": sid}
+
+
+@app.get("/api/live/search/{sid}")
+def api_live_search_get(sid: str):
+    d = live_dir() / safe_name(sid)
+    if not (d / "project.json").exists():
+        raise HTTPException(404, "Search not found.")
+    p = load(d)
+    p["job"] = JOBS.get(rid(d), {})
+    p["id"] = sid
+    return p
+
+
+@app.post("/api/live/search/{sid}/cancel")
+def api_live_search_cancel(sid: str):
+    d = live_dir() / safe_name(sid)
+    media.cancel(rid(d))
+    return {"ok": True}
+
+
+@app.post("/api/live/search/{sid}/approve")
+def api_live_approve(sid: str, body: dict = Body(...)):
+    """Turn the moments you ticked into reels (clipped in full quality, one after another)."""
+    d = live_dir() / safe_name(sid)
+    p = load(d)
+    pick = set(body.get("ids") or [])
+    ms = [m for m in (p.get("moments") or []) if m.get("id") in pick]
+    if not ms:
+        raise HTTPException(400, "Tick at least one moment.")
+    st = p["stream"]
+    req = {"source": {"type": "youtube", "url": st["clip_url"]}, "creator": st["creator"],
+           "target": int(body.get("target", p.get("target") or 0)), "auto_export": bool(body.get("auto_export", True)),
+           "moments": [{"ranges": [{"start": m["start"], "end": m["end"]}], "scenario": m.get("scenario") or ""} for m in ms]}
+    r = create_reels(body["day"], req)
+    update(d, approved=sorted(pick), approved_day=body["day"])
+    return r
+
 
 @app.get("/api/state")
 def state():

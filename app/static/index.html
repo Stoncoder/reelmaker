@@ -11,6 +11,7 @@
   <a href="#" id="homeLink" class="brand">🎬 Reelmaker</a>
   <div class="dayPick">
     <select id="daySel" title="Day folder"></select>
+    <button id="liveBtn" class="small liveBtn" title="See who's live on YouTube, Twitch and Kick and clip their streams">🔴 Live</button>
     <button id="newDayBtn" class="ghost small">+ New day</button>
     <button id="restartBtn" class="ghost small" title="Restart Reelmaker — loads updates. Your edits are saved first.">⟳ Restart</button>
     <button id="updateBtn" class="small update hidden" title="A newer Reelmaker is available">⬆ Update</button>
@@ -83,6 +84,41 @@
     <div id="reelList" class="reelList"></div>
   </section>
   <p id="versionLine" class="versionLine hint"><span id="versionText">Reelmaker</span> · <a href="#" id="checkUpdBtn">Check for updates</a></p>
+</main>
+
+<main id="live" class="view hidden">
+  <section class="card">
+    <div class="row"><h2 class="grow" style="margin:0">🔴 Live now</h2>
+      <span id="liveChecked" class="hint"></span>
+      <button id="liveRefresh" class="small">↻ Check again</button>
+      <button id="liveEdit" class="ghost small">Edit creators</button></div>
+    <p class="hint">Your creators who are live on YouTube, Twitch and Kick right now. Pick a stream → the app finds its best moments → you tick the ones you want → they're clipped into reels. It only checks when this page is open. Always follow each creator's clipping rules.</p>
+    <div id="creatorEdit" class="hidden">
+      <p class="hint">One creator per line: <b>Name | YouTube handle | Twitch name | Kick name</b> (leave a part empty if they're not on that platform).</p>
+      <textarea id="creatorsIn" rows="8" class="mono"></textarea>
+      <div class="row"><button id="creatorSave" class="small primary">Save</button><button id="creatorReset" class="ghost small">Reset to built-in list</button></div>
+    </div>
+    <div id="liveGrid" class="liveGrid"></div>
+    <div id="liveOffline" class="hint"></div>
+  </section>
+
+  <section id="liveFind" class="card hidden">
+    <div class="row"><img id="lfThumb" class="lfThumb" alt=""><div class="grow"><h3 id="lfTitle" style="margin:0"></h3><div id="lfSub" class="hint"></div></div></div>
+    <div class="row gap">
+      <label>Search the last <select id="lfMinutes"><option value="15">15 min</option><option value="30" selected>30 min</option><option value="60">1 hour</option><option value="120">2 hours</option><option value="0">whole stream</option></select></label>
+      <label>Find <input id="lfCount" type="number" min="1" max="10" value="5" class="num"> moments</label>
+      <button id="lfGo" class="primary">✨ Find the best moments</button>
+    </div>
+    <div id="lfStatus"></div>
+    <div id="lfMoments"></div>
+    <div id="lfApprove" class="hidden">
+      <div class="row gap">
+        <label>Length <select id="lfTarget"><option value="0" selected>✨ Auto</option><option value="20">~20s</option><option value="30">~30s</option><option value="45">~45s</option><option value="60">~60s</option></select></label>
+        <label class="chk"><input type="checkbox" id="lfAuto" checked> Export the final MP4s automatically</label>
+      </div>
+      <button id="lfMake" class="primary big">Make reels from the ticked moments</button>
+    </div>
+  </section>
 </main>
 
 <main id="editor" class="view hidden">

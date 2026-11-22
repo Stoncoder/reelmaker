@@ -262,7 +262,8 @@ def youtube_meta(url: str) -> dict:
         "title": d.get("title"),
         "channel": d.get("channel") or d.get("uploader") or "",
         "duration": d.get("duration") or 0,
-        "is_live": bool(d.get("is_live")),
+        "is_live": bool(d.get("is_live")) or d.get("live_status") in ("is_live", "post_live"),
+        "live_status": d.get("live_status"),
     }
 
 
@@ -524,7 +525,8 @@ def fetch_youtube_piece(url: str, start: float, end: float, dst: Path, log) -> d
         f.unlink()
     method = "direct"
     try:
-        log(f"Fetching only {fmt_time(a)}–{fmt_time(b)} straight from YouTube (one fast pass)…")
+        site = "Twitch" if "twitch.tv" in url else "Kick" if "kick.com" in url else "YouTube"
+        log(f"Fetching only {fmt_time(a)}–{fmt_time(b)} straight from {site} (one fast pass)…")
         try:
             _direct_fetch(url, a, b, dst)
             if video_info(dst)["duration"] < (b - a) * 0.8:

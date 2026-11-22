@@ -13,6 +13,7 @@ const h = (tag, attrs = {}, ...kids) => {
   return e;
 };
 const S = { st: null, day: "", folder: "", p: null, piece: 0, kf: 0, tab: "cut", poll: null, playList: null };
+const LV = { streams: [], sel: null, search: null, poll: null };   // Live tab
 
 function fmt(t) {
   if (t == null || isNaN(t)) return "";
@@ -66,7 +67,7 @@ async function loadState() {
 async function loadReels() {
   $("#dayName").textContent = S.day || "—";
   const real = $("#reelList"), y = window.scrollY;
-  if (!S.day) { real.innerHTML = ""; real.append(h("p", { class: "hint" }, "Create a day folder first (top right).")); return; }
+  if (!S.day) { real.innerHTML = ""; real.append(h("p", { class: "hint" }, "No reels yet — they'll appear here after “Make my reels”.")); return; }
   const reels = await api("GET", `/api/days/${enc(S.day)}/reels`);
   // build off-screen, then swap in one go, so the page never collapses and jumps to the top
   const list = document.createDocumentFragment();
@@ -223,7 +224,7 @@ function drawPlan() {
   $("#autoRow").classList.toggle("hidden", !auto); $("#mineRow").classList.toggle("hidden", auto);
   const ms = auto ? [] : moments;
   const out = [], timed = ms.filter((m) => m.ranges.length).length, untimed = ms.filter((m) => !m.ranges.length && !m.error).length;
-  if (!S.day) out.push("⚠ First create a day folder: “+ New day” at the top.");
+  if (!S.day) out.push(`Your reels go in a new folder, “${autoDayName()}” (use “+ New day” at the top to name it yourself).`);
   const sw = searchWindow();
   if (!ms.length) {
     const n = +$("#countIn").value || 1;
@@ -241,18 +242,29 @@ function drawPlan() {
     : "Automatic export is off: you'll export each reel yourself (or use “Export all” below).");
   $("#planSummary").textContent = out.join("\n");
   const bad = ms.some((m) => m.error), empty = !auto && !ms.length, werr = auto && sw.err;
-  $("#createBtn").disabled = !S.day || bad || empty || !!werr;
+  $("#createBtn").disabled = bad || empty || !!werr;
   $("#createBtn").textContent = bad ? "Fix the highlighted line first" : werr ? "Fix the search window first" : "Make my reels";
 }
 let parseTimer;
 $("#scenIn").oninput = () => { clearTimeout(parseTimer); parseTimer = setTimeout(parseMoments, 300); };
 ["#countIn", "#targetSel", "#winA", "#winB", "#autoExport"].forEach((id) => $(id).addEventListener("input", drawPlan));
 $$("input[name=clipMode]").forEach((r) => (r.onchange = drawPlan));
+/* a first-time user has no day folder yet: make one for them instead of blocking “Make my reels” */
+const autoDayName = () => "Reels " + new Date().toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+async function ensureDay() {
+  if (S.day) return true;
+  const r = await api("POST", "/api/days", { name: autoDayName() }).catch(() => null);
+  if (!r) return false;
+  S.day = r.day;
+  await api("POST", "/api/last-day", { day: S.day }).catch(() => {});
+  await loadState();
+  return true;
+}
 $("#createBtn").onclick = async () => {
-  if (!S.day) return toast("Create or choose a day folder first.");
   const auto = autoMode(), sw = searchWindow();
   if (auto && sw.err) return toast(sw.err);
   if (!auto) { await parseMoments(); if (moments.some((m) => m.error) || !moments.length) return; }
+  if (!(await ensureDay())) return;
   const yt = $("input[name=srcType]:checked").value === "youtube";
   const source = yt ? { type: "youtube", url: $("#urlIn").value } : { type: "file", path: $("#pathIn").value };
   const body = { source, moments: auto ? [] : moments, window: auto ? sw.win : null, creator: $("#creatorIn").value, target: +$("#targetSel").value, count: +$("#countIn").value, auto_export: $("#autoExport").checked };
@@ -271,6 +283,15 @@ async function route() {
   clearTimeout(S.poll);
   await flushSave();   // an edit made just before leaving still lands in the reel it was made in
   if (!S.st) await loadState();
+  $("#live").classList.toggle("hidden", location.hash !== "#/live");
+  if (location.hash === "#/live") {
+    S.folder = ""; S.p = null; stopAll();
+    $("#editor").classList.add("hidden"); $("#home").classList.add("hidden");
+    window.scrollTo(0, 0);
+    openLive();
+    return;
+  }
+  clearTimeout(LV.poll);
   if (m) {
     S.day = decodeURIComponent(m[1]); S.folder = decodeURIComponent(m[2]);
     $("#home").classList.add("hidden"); $("#editor").classList.remove("hidden");
@@ -1400,3 +1421,133 @@ $("#saySave").onclick = async () => {
   changed();             // the reel's voice needs a new preview
   $("#ttsBtn").click();  // and play it with the fix right away
 };
+
+/* ------------------------------------------------------------------ Live tab */
+// Who's live → pick a stream → find its best moments → tick → reels. Checks only while this page is open.
+const PLAT = { youtube: "YouTube", twitch: "Twitch", kick: "Kick" };
+$("#liveBtn").onclick = () => { location.hash = "#/live"; };
+function ago(sec) {
+  if (sec == null) return "";
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+  return h ? `${h}h ${m}m` : `${m}m`;
+}
+async function openLive(refresh = false) {
+  const grid = $("#liveGrid");
+  if (!LV.streams.length || refresh) grid.innerHTML = '<p class="hint">Checking who\'s live… (a few seconds)</p>';
+  $("#liveRefresh").disabled = true;
+  try {
+    const r = await api("GET", "/api/live/now" + (refresh ? "?refresh=1" : ""));
+    LV.streams = r.streams;
+    drawLive(r);
+  } finally { $("#liveRefresh").disabled = false; }
+  if (LV.search) pollSearch();
+}
+function drawLive(r) {
+  const grid = $("#liveGrid"); grid.innerHTML = "";
+  $("#liveChecked").textContent = "checked " + new Date(r.checked_at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  if (!r.streams.length) grid.append(h("p", { class: "hint" }, "None of your creators are live right now. Check again later, or add more creators."));
+  r.streams.forEach((s, i) => {
+    const card = h("div", { class: "liveCard" + (LV.sel && LV.sel.clip_url === s.clip_url ? " sel" : "") + (s.clip_url ? "" : " off") },
+      h("div", { class: "lcThumb" }, s.thumbnail ? h("img", { src: s.thumbnail, alt: "", loading: "lazy", onerror: (e) => e.target.remove() }) : null,
+        h("span", { class: "lcLive" }, "LIVE"), h("span", { class: "lcPlat " + s.platform }, PLAT[s.platform])),
+      h("b", {}, s.creator),
+      h("div", { class: "lcTitle" }, s.title || ""),
+      h("div", { class: "hint" }, [s.viewers ? `${s.viewers.toLocaleString()} watching` : null, s.uptime ? `live for ${ago(s.uptime)}` : null].filter(Boolean).join(" · ")),
+      s.note ? h("div", { class: "hint err" }, s.note) : null,
+      h("div", { class: "row" },
+        h("button", { class: "small primary", disabled: !s.clip_url, onclick: () => pickStream(s) }, "Clip this stream"),
+        h("a", { class: "ghost small linkbtn", href: s.watch_url, target: "_blank", rel: "noopener" }, "Watch ↗")));
+    grid.append(card);
+  });
+  $("#liveOffline").textContent = r.offline.length ? "Offline: " + r.offline.join(", ") : "";
+}
+function pickStream(s) {
+  LV.sel = s; LV.search = null; clearTimeout(LV.poll);
+  $("#liveFind").classList.remove("hidden");
+  $("#lfThumb").src = s.thumbnail || ""; $("#lfTitle").textContent = `${s.creator} · ${PLAT[s.platform]}`;
+  $("#lfSub").textContent = s.title || "";
+  $("#lfStatus").innerHTML = ""; $("#lfMoments").innerHTML = ""; $("#lfApprove").classList.add("hidden");
+  $("#lfGo").disabled = false;
+  drawLive({ streams: LV.streams, offline: [], checked_at: Date.now() / 1000 });
+  $("#liveFind").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+$("#liveRefresh").onclick = () => openLive(true);
+$("#lfGo").onclick = async () => {
+  if (!LV.sel) return;
+  $("#lfGo").disabled = true; $("#lfMoments").innerHTML = ""; $("#lfApprove").classList.add("hidden");
+  try {
+    const r = await api("POST", "/api/live/search", { stream: LV.sel, minutes: +$("#lfMinutes").value, count: +$("#lfCount").value, target: +$("#lfTarget").value });
+    LV.search = { id: r.id }; pollSearch();
+  } catch (e) { $("#lfGo").disabled = false; }
+};
+async function pollSearch() {
+  clearTimeout(LV.poll);
+  if (!LV.search || location.hash !== "#/live") return;
+  const p = await api("GET", `/api/live/search/${LV.search.id}`).catch(() => null);
+  if (!p) return;
+  LV.search.p = p;
+  const box = $("#lfStatus"), j = p.job || {};
+  box.innerHTML = "";
+  const last = (p.log || []).slice(-1)[0] || "";
+  if (p.state === "ready") {
+    box.append(h("div", { class: "hint" }, last.slice(9)));
+    drawMoments(p); $("#lfGo").disabled = false; $("#lfGo").textContent = "↻ Search again";
+    return;
+  }
+  if (p.state === "error") {
+    box.append(h("div", { class: "err" }, (p.error || "").split("\n")[0]));
+    $("#lfGo").disabled = false; return;
+  }
+  const t = j.task || {};
+  box.append(h("b", {}, t.label || "Searching the stream…"),
+    h("div", { class: "bar" }, h("i", { style: `width:${Math.round((j.progress || 0) * 100)}%` })),
+    h("div", { class: "hint" }, last.slice(9)),
+    h("button", { class: "ghost small", onclick: async () => { await api("POST", `/api/live/search/${LV.search.id}/cancel`); toast("Stopping…"); } }, "Cancel"));
+  LV.poll = setTimeout(pollSearch, 1500);
+}
+function drawMoments(p) {
+  const box = $("#lfMoments"); box.innerHTML = "";
+  const ms = p.moments || [];
+  if (!ms.length) { box.append(h("p", { class: "hint" }, "No strong moments found in that part. Try a longer search.")); return; }
+  const done = new Set(p.approved || []);
+  ms.forEach((m) => box.append(h("label", { class: "momentRow" },
+    h("input", { type: "checkbox", value: m.id, checked: !done.has(m.id), disabled: done.has(m.id) }),
+    h("div", {},
+      h("div", {}, h("span", { class: "badge" }, `${fmtT(m.start)}–${fmtT(m.end)}`), " ", h("b", {}, m.scenario || "Big moment"), done.has(m.id) ? h("span", { class: "hint" }, "  ✓ reel made") : null),
+      m.why ? h("div", { class: "hint" }, m.why) : null,
+      m.said ? h("div", { class: "hint said" }, "“" + m.said.slice(0, 220) + (m.said.length > 220 ? "…" : "") + "”") : null,
+      h("a", { class: "hint", href: watchAt(m.start), target: "_blank", rel: "noopener" }, "Check it on the stream ↗")))));
+  $("#lfApprove").classList.remove("hidden");
+}
+function fmtT(s) { s = Math.max(0, Math.round(s)); const hh = Math.floor(s / 3600), mm = Math.floor((s % 3600) / 60), ss = s % 60; return (hh ? hh + ":" + String(mm).padStart(2, "0") : mm) + ":" + String(ss).padStart(2, "0"); }
+function watchAt(t) {
+  const u = LV.search?.p?.stream?.clip_url || "", s = Math.floor(t);
+  if (u.includes("youtube.com")) return u + "&t=" + s + "s";
+  if (u.includes("twitch.tv")) return u + "?t=" + Math.floor(s / 3600) + "h" + Math.floor((s % 3600) / 60) + "m" + (s % 60) + "s";
+  return u;
+}
+$("#lfMake").onclick = async () => {
+  const ids = [...$("#lfMoments").querySelectorAll("input[type=checkbox]:checked:not(:disabled)")].map((x) => +x.value);
+  if (!ids.length) return toast("Tick at least one moment.");
+  if (!S.day) return toast("Create or choose a day folder first (top right).");
+  $("#lfMake").disabled = true;
+  try {
+    const r = await api("POST", `/api/live/search/${LV.search.id}/approve`, { ids, day: S.day, target: +$("#lfTarget").value, auto_export: $("#lfAuto").checked });
+    toast(`${r.created.length} reel${r.created.length > 1 ? "s are" : " is"} being made in “${S.day}” — they're clipped in full quality one after another.`, 7000);
+    LV.search.p.approved = [...(LV.search.p.approved || []), ...ids]; drawMoments(LV.search.p);
+  } finally { $("#lfMake").disabled = false; }
+};
+$("#liveEdit").onclick = async () => {
+  const box = $("#creatorEdit"); box.classList.toggle("hidden");
+  if (box.classList.contains("hidden")) return;
+  const r = await api("GET", "/api/live/creators");
+  $("#creatorsIn").value = r.creators.map((c) => [c.name, c.youtube || "", c.twitch || "", c.kick || ""].join(" | ")).join("\n");
+};
+async function saveCreators(list) {
+  const r = await api("PUT", "/api/live/creators", { creators: list });
+  $("#creatorsIn").value = r.creators.map((c) => [c.name, c.youtube || "", c.twitch || "", c.kick || ""].join(" | ")).join("\n");
+  toast(`Saved ${r.creators.length} creators. Checking who's live…`); openLive(true);
+}
+$("#creatorSave").onclick = () => saveCreators($("#creatorsIn").value.split("\n").map((l) => l.split("|").map((x) => x.trim()))
+  .filter((x) => x[0]).map(([name, youtube, twitch, kick]) => ({ name, youtube, twitch, kick })));
+$("#creatorReset").onclick = () => { if (confirm("Go back to the built-in creator list?")) saveCreators([]); };
