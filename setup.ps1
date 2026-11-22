@@ -35,6 +35,16 @@ function Run($exe, [string[]]$argv) {   # run a program, stop setup if it fails
   & $exe @argv
   if ($LASTEXITCODE -ne 0) { Fail "$exe $($argv -join ' ') failed (exit $LASTEXITCODE)" }
 }
+# slow or patchy internet: wait longer before calling a download stuck, and try again instead of giving up
+$env:PIP_DEFAULT_TIMEOUT = "120"; $env:PIP_RETRIES = "10"; $env:HF_HUB_DOWNLOAD_TIMEOUT = "120"; $env:HF_HUB_ETAG_TIMEOUT = "60"
+function RunRetry($what, $exe, [string[]]$argv) {   # like Run, but up to 4 tries (downloads resume where they stopped)
+  for ($n = 1; $n -le 4; $n++) {
+    & $exe @argv
+    if ($LASTEXITCODE -eq 0) { return }
+    if ($n -lt 4) { Write-Host "    ! $what didn't finish (slow internet?). Trying again ($($n + 1)/4) in 10 s..." -ForegroundColor Yellow; Start-Sleep 10 }
+  }
+  Fail "$what failed 4 times. Check the internet connection, then run Setup again - it continues where it stopped."
+}
 
 # ---------------------------------------------------------------- this PC
 Step "Checking this PC"
@@ -110,7 +120,7 @@ if (Test-Path "models\faster-whisper-large-v3-turbo\model.bin") {
 } else {
   Write-Host "    Downloading Whisper large-v3-turbo (speech to text, 1.6 GB)..."
   $env:HF_HUB_DISABLE_XET = "1"
-  Run $vpy @("-c", "from huggingface_hub import snapshot_download as d; d('mobiuslabsgmbh/faster-whisper-large-v3-turbo', local_dir='models/faster-whisper-large-v3-turbo')")
+  RunRetry "Downloading the speech-to-text model" $vpy @("-c", "from huggingface_hub import snapshot_download as d; d('mobiuslabsgmbh/faster-whisper-large-v3-turbo', local_dir='models/faster-whisper-large-v3-turbo')")
   Ok "Whisper large-v3-turbo"
 }
 
@@ -126,7 +136,7 @@ if (-not (OllamaUp)) {
 $have = (Probe $ollama @("list")).Out -match '(?m)^qwen2\.5:7b'
 if ($have) { Ok "qwen2.5:7b (already here)" } else {
   Write-Host "    Downloading qwen2.5:7b (writes hooks and picks the story, 4.7 GB)..."
-  Run $ollama @("pull", "qwen2.5:7b"); Ok "qwen2.5:7b"
+  RunRetry "Downloading qwen2.5:7b" $ollama @("pull", "qwen2.5:7b"); Ok "qwen2.5:7b"
 }
 if ($ramGB -ge 24) { Write-Host "    Tip: with $ramGB GB memory you can use the bigger, better model:  ollama pull qwen2.5:14b" }
 
@@ -147,10 +157,10 @@ if ($haveVoice) {
   if ($want) {
     if (-not (Test-Path $tpy)) { Run $py ($pyArgs + @("-m", "venv", ".venv-tts")) }
     Run $tpy @("-m", "pip", "install", "--quiet", "--upgrade", "pip")
-    Run $tpy @("-m", "pip", "install", "--quiet", "-r", "requirements-voice.txt")
+    RunRetry "Installing the voice packages" $tpy @("-m", "pip", "install", "--quiet", "-r", "requirements-voice.txt")
     Write-Host "    Downloading the voice model (first time only)..."
     $env:HF_HUB_DISABLE_XET = "1"
-    Run $tpy @("-c", "from huggingface_hub import snapshot_download as d; d('ResembleAI/chatterbox', allow_patterns=['ve.safetensors', 't3_cfg.safetensors', 's3gen.safetensors', 'tokenizer.json', 'conds.pt'])")
+    RunRetry "Downloading the voice model" $tpy @("-c", "from huggingface_hub import snapshot_download as d; d('ResembleAI/chatterbox', allow_patterns=['ve.safetensors', 't3_cfg.safetensors', 's3gen.safetensors', 'tokenizer.json', 'conds.pt'])")
     Ok "Hype narrator voice"
   } else { Ok "Skipped (run setup.ps1 -Voice any time to add it)" }
 }

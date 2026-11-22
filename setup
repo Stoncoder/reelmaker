@@ -7,6 +7,18 @@
 set -e
 cd "$(dirname "$0")"
 HERE="$PWD"
+# slow or patchy internet: wait longer before calling a download stuck, and try again instead of giving up
+export PIP_DEFAULT_TIMEOUT=120 PIP_RETRIES=10 HF_HUB_DOWNLOAD_TIMEOUT=120 HF_HUB_ETAG_TIMEOUT=60
+retry() {   # retry "what" command...: up to 4 tries; downloads resume where they stopped
+  local what="$1"; shift
+  local n
+  for n in 1 2 3 4; do
+    "$@" && return 0
+    (( n < 4 )) && { echo "    ⚠ $what didn't finish (slow internet?). Trying again ($((n + 1))/4) in 10 s…"; sleep 10; }
+  done
+  echo "    ✗ $what failed 4 times. Check the internet connection, then run setup again — it continues where it stopped."
+  return 1
+}
 
 YES=0; VOICE=ask; SHORTCUT=ask; UPDATE=0
 for a in "$@"; do
@@ -97,11 +109,11 @@ if [[ -f models/whisper-large-v3-turbo/weights.safetensors && -f models/whisper-
   ok "Whisper large-v3-turbo (already here)"
 else
   echo "    Downloading Whisper large-v3-turbo (speech to text, 1.6 GB)…"
-  HF_HUB_DISABLE_XET=1 .venv/bin/python - <<'PY'
+  HF_HUB_DISABLE_XET=1 retry "Downloading Whisper" .venv/bin/python -c "
 from huggingface_hub import snapshot_download
-snapshot_download("mlx-community/whisper-large-v3-turbo", local_dir="models/whisper-large-v3-turbo",
-                  allow_patterns=["config.json", "weights.safetensors"])
-PY
+snapshot_download('mlx-community/whisper-large-v3-turbo', local_dir='models/whisper-large-v3-turbo',
+                  allow_patterns=['config.json', 'weights.safetensors'])
+"
   ok "Whisper large-v3-turbo"
 fi
 
@@ -116,7 +128,7 @@ if ollama list 2>/dev/null | grep -q '^qwen2.5:7b'; then
   ok "qwen2.5:7b (already here)"
 else
   echo "    Downloading qwen2.5:7b (writes hooks and picks the story, 4.7 GB)…"
-  ollama pull qwen2.5:7b && ok "qwen2.5:7b"
+  retry "Downloading qwen2.5:7b" ollama pull qwen2.5:7b && ok "qwen2.5:7b"
 fi
 if (( RAM_GB >= 24 )) && ! ollama list 2>/dev/null | grep -q '^qwen2.5:14b'; then
   echo "    Tip: with ${RAM_GB} GB memory you can use the bigger, better model:  ollama pull qwen2.5:14b"
@@ -137,9 +149,9 @@ else
   if [[ "$VOICE" == yes ]]; then
     [[ -x .venv-tts/bin/python ]] || "$PY" -m venv .venv-tts
     .venv-tts/bin/python -m pip install --quiet --upgrade pip
-    .venv-tts/bin/python -m pip install --quiet -r requirements-voice.txt
+    retry "Installing the voice packages" .venv-tts/bin/python -m pip install --quiet -r requirements-voice.txt
     echo "    Downloading the voice model (first time only)…"
-    HF_HUB_DISABLE_XET=1 PYTORCH_ENABLE_MPS_FALLBACK=1 .venv-tts/bin/python -c "
+    HF_HUB_DISABLE_XET=1 PYTORCH_ENABLE_MPS_FALLBACK=1 retry "Downloading the voice model" .venv-tts/bin/python -c "
 import torch
 from huggingface_hub import snapshot_download
 snapshot_download('ResembleAI/chatterbox', allow_patterns=['ve.safetensors', 't3_cfg.safetensors', 's3gen.safetensors', 'tokenizer.json', 'conds.pt'])
