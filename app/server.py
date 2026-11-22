@@ -214,6 +214,25 @@ def voice_default() -> dict:
     return out
 
 
+def follow_default_voice(p: dict) -> bool:
+    """A reel whose voice you never changed by hand always uses your CURRENT default voice tone — also reels
+    that were made before you saved the default. Returns True if the reel's hook was changed."""
+    k = p.get("hook")
+    if not k or k.get("voice_file"):
+        return False
+    if "voice_custom" not in k:            # reels from before this rule: keep a voice that's already exported
+        k["voice_custom"] = bool(p.get("final"))
+        if k["voice_custom"]:
+            return True
+    if k["voice_custom"]:
+        return False
+    vd = voice_default()
+    if all(k.get(x) == vd[x] for x in VOICE_KEYS):
+        return False
+    k.update({x: vd[x] for x in VOICE_KEYS})
+    return True
+
+
 def presets() -> dict:
     return read_json(PRESETS_FILE, {"presets": {}, "channel_default": {}})
 
@@ -510,7 +529,7 @@ def pipeline(d: Path):
         hook = {"enabled": True, "screen": hooks[0], "voice_text": hooks[0], "linked": True,
                 "voice": vd["voice"], "voice_ref": vd["voice_ref"], "energy": vd["energy"],
                 "speed": vd["speed"], "duck_db": vd["duck_db"], "options": hooks, "story": story_note, "confidence": conf,
-                "payoff_time": payoff, "voice_file": None,
+                "payoff_time": payoff, "voice_file": None, "voice_custom": False,
                 "source": story.HOOK_INFO.get("source") or ("local" if ai.ollama_ok() else "fallback"),
                 "writer_model": story.HOOK_INFO.get("model"), "writer_note": story.HOOK_INFO.get("note")}
         if story.HOOK_INFO.get("source") == "groq":
@@ -555,7 +574,10 @@ def do_render(d: Path, final: bool, learn: bool = True, then_final: bool = False
     key = "final" if final else "draft"
     try:
         set_job(d, render=key, render_progress=0, render_error=None, render_phase=None, render_started=time.time())
-        p = load(d)
+        with LOCK:
+            p = load(d)
+            if follow_default_voice(p):   # use your current default voice unless you set one for this reel
+                save(d, p)
 
         def prog(f, phase=None):
             j = JOBS.setdefault(rid(d), {})
@@ -987,7 +1009,10 @@ def create_reels(day: str, body: dict = Body(...)):
 @app.get("/api/reel/{day}/{reel}")
 def get_reel(day: str, reel: str):
     d = reel_dir(day, reel)
-    p = load(d)
+    with LOCK:
+        p = load(d)
+        if follow_default_voice(p):
+            save(d, p)
     p["job"] = JOBS.get(rid(d), {})
     p["folder_path"] = str(d)
     try:
@@ -1186,6 +1211,7 @@ def apply_voice_all(day: str, body: dict = Body(...)):
             if all(p["hook"].get(k) == v for k, v in vals.items()):
                 continue
             p["hook"].update(vals)
+            p["hook"]["voice_custom"] = True   # you picked this voice for them on purpose
             save(d, p)
         changed.append({"folder": d.name, "had_final": bool(p.get("final"))})
     return {"updated": changed}

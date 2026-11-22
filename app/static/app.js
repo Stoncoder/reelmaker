@@ -1017,7 +1017,8 @@ $("#hookOn").onchange = (e) => { S.p.hook.enabled = e.target.checked; changed(fa
 $("#hookScreen").oninput = (e) => { const k = S.p.hook; k.screen = e.target.value; if (k.linked) { k.voice_text = k.screen; $("#hookVoiceText").value = k.screen; } changed(false); };
 $("#hookVoiceText").oninput = (e) => { S.p.hook.voice_text = e.target.value; changed(false); };
 $("#hookLinked").onchange = (e) => { const k = S.p.hook; k.linked = e.target.checked; if (k.linked) k.voice_text = k.screen; changed(false); drawHook(); };
-$("#voiceSel").onchange = (e) => { S.p.hook.voice = e.target.value; changed(false); drawHook(); };
+const pinVoice = () => { S.p.hook.voice_custom = true; };   // this reel keeps its own voice from now on
+$("#voiceSel").onchange = (e) => { S.p.hook.voice = e.target.value; pinVoice(); changed(false); drawHook(); };
 
 /* default voice tone */
 const VD_KEYS = ["voice", "energy", "speed", "duck_db", "voice_ref"];
@@ -1037,10 +1038,12 @@ function drawVoiceDefault() {
 }
 $("#vdSave").onclick = async () => {
   S.st.voice_default = await api("POST", "/api/voice-default", voiceNow()); S.st.voice_default_saved = true;
-  drawVoiceDefault(); toast("Saved. Every new reel starts with this voice tone.");
+  S.p.hook.voice_custom = false; changed(false);
+  drawVoiceDefault(); toast("Saved. Every reel you haven't given its own voice now uses this one — exported reels keep theirs.");
 };
 $("#vdUse").onclick = () => {
   Object.assign(S.p.hook, Object.fromEntries(VD_KEYS.map((k) => [k, S.st.voice_default[k]])));
+  S.p.hook.voice_custom = false;   // follow the default again, also when you change it later
   changed(false); drawHook(); toast("This reel now uses your default voice — Hear it or Update preview.");
 };
 $("#vdReset").onclick = async () => {
@@ -1059,13 +1062,13 @@ $("#vdAll").onclick = async () => {
 };
 $("#refBtn").onclick = async () => {
   const r = await api("POST", "/api/pick-audio"); if (!r.path) return;
-  S.p.hook.voice_ref = r.path; changed(false); drawHook();
+  S.p.hook.voice_ref = r.path; pinVoice(); changed(false); drawHook();
   toast("New reels will use this voice sample too.");
 };
-$("#refClear").onclick = () => { S.p.hook.voice_ref = null; changed(false); drawHook(); };
-$("#energyIn").oninput = (e) => { S.p.hook.energy = +e.target.value; $("#energyVal").textContent = (+e.target.value).toFixed(2); changed(false); drawVoiceDefault(); };
-$("#speedIn").oninput = (e) => { S.p.hook.speed = +e.target.value; $("#speedVal").textContent = ` ${(+e.target.value).toFixed(2)}×`; changed(false); drawVoiceDefault(); };
-$("#duckIn").oninput = (e) => { S.p.hook.duck_db = +e.target.value; $("#duckVal").textContent = `${e.target.value} dB`; changed(false); drawVoiceDefault(); };
+$("#refClear").onclick = () => { S.p.hook.voice_ref = null; pinVoice(); changed(false); drawHook(); };
+$("#energyIn").oninput = (e) => { S.p.hook.energy = +e.target.value; pinVoice(); $("#energyVal").textContent = (+e.target.value).toFixed(2); changed(false); drawVoiceDefault(); };
+$("#speedIn").oninput = (e) => { S.p.hook.speed = +e.target.value; pinVoice(); $("#speedVal").textContent = ` ${(+e.target.value).toFixed(2)}×`; changed(false); drawVoiceDefault(); };
+$("#duckIn").oninput = (e) => { S.p.hook.duck_db = +e.target.value; pinVoice(); $("#duckVal").textContent = `${e.target.value} dB`; changed(false); drawVoiceDefault(); };
 $("#ttsBtn").onclick = async () => {
   const b = $("#ttsBtn"); b.disabled = true; b.textContent = "Generating…";
   try {
