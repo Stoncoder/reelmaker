@@ -13,6 +13,7 @@
     <select id="daySel" title="Day folder"></select>
     <button id="newDayBtn" class="ghost small">+ New day</button>
     <button id="restartBtn" class="ghost small" title="Restart Reelmaker — loads updates. Your edits are saved first.">⟳ Restart</button>
+    <button id="updateBtn" class="small update hidden" title="A newer Reelmaker is available">⬆ Update</button>
   </div>
   <div id="usageBar" class="usageBar hidden">
     <a id="ubTask" class="ubTask" href="#"><span id="ubLabel"></span><span class="bar small"><i id="ubTaskBar"></i></span><span id="ubPct" class="ubNum"></span></a>
@@ -81,6 +82,7 @@
     </div>
     <div id="reelList" class="reelList"></div>
   </section>
+  <p id="versionLine" class="versionLine hint"><span id="versionText">Reelmaker</span> · <a href="#" id="checkUpdBtn">Check for updates</a></p>
 </main>
 
 <main id="editor" class="view hidden">

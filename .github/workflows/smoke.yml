@@ -20,6 +20,8 @@ jobs:
       PYTHONIOENCODING: utf-8
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2                # the install/update test needs the previous commit too
 
       - uses: actions/setup-python@v5
         with:
@@ -29,7 +31,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $code = '$bad = 0; foreach ($f in "setup.ps1", "reelmaker.ps1") { $e = $null; [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f), [ref]$null, [ref]$e) | Out-Null; if ($e) { $e | ForEach-Object { "$f : $($_.Message) (line $($_.Extent.StartLineNumber))" }; $bad = 1 } }; exit $bad'
+          $code = '$bad = 0; foreach ($f in "setup.ps1", "reelmaker.ps1", "install.ps1") { $e = $null; [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f), [ref]$null, [ref]$e) | Out-Null; if ($e) { $e | ForEach-Object { "$f : $($_.Message) (line $($_.Extent.StartLineNumber))" }; $bad = 1 } }; exit $bad'
           pwsh -NoProfile -Command $code
           if ($LASTEXITCODE) { exit 1 }
           powershell -NoProfile -Command $code
@@ -50,3 +52,14 @@ jobs:
       - name: Smoke test
         shell: bash
         run: python -m tests.smoke
+
+      - name: Install with the one-line installer, then update an older copy
+        shell: bash
+        env:
+          REELMAKER_BRANCH: ${{ github.sha }}         # install exactly this commit
+          REELMAKER_SKIP_SETUP: "1"                   # setup itself is covered by the smoke test above
+          REELMAKER_GITHUB_TOKEN: ${{ github.token }} # avoids GitHub's shared limit for anonymous API calls
+        run: |
+          export REELMAKER_DIR="$RUNNER_TEMP/rm-install"
+          if [ "$RUNNER_OS" = "macOS" ]; then zsh install.sh; else powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1; fi
+          python -m tests.update_test "$REELMAKER_DIR" "$(git rev-parse HEAD~1)"

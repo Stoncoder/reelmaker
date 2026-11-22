@@ -151,3 +151,11 @@ header{flex-wrap:wrap}
 #restartOverlay{position:fixed;inset:0;z-index:100;background:rgba(10,12,16,.82);display:flex;align-items:center;justify-content:center}
 #restartOverlay div{background:var(--card,#1a1d24);border:1px solid var(--line);border-radius:12px;padding:22px 28px;font-size:15px;text-align:center;max-width:420px}
 #restartOverlay .hint{display:block;margin-top:8px}
+button.update{background:#1f6f43;border-color:#2a9158;color:#fff}
+button.update:hover{background:#25834f}
+.versionLine{text-align:center;margin:6px auto 24px;font-size:12px}
+.versionLine a{color:var(--mut)}
+#restartOverlay .updBox{max-width:620px;width:90vw;text-align:left}
+#restartOverlay .updBox .hint{margin:6px 0 10px}
+#restartOverlay .updBox button{margin:10px 8px 0 0}
+.updLog{max-height:260px;overflow:auto;background:#0d0f14;border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:11.5px;line-height:1.45;white-space:pre-wrap;margin:0}

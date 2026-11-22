@@ -18,3 +18,7 @@ desktop.ini
 # never commit secrets (API keys live in the macOS Keychain / Windows Credential Manager, not in files)
 .env
 *.key
+
+# update bookkeeping (which version is installed; half-written files during an update)
+.reelmaker-version
+*.update-tmp

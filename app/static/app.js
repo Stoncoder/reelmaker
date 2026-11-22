@@ -334,7 +334,7 @@ $("#homeLink").onclick = (e) => { e.preventDefault(); location.hash = ""; };
 
 /* ------------------------------------------------------------------ out-of-date tab */
 // An open tab keeps running the page it loaded. If Reelmaker is updated meanwhile, say so (once) and offer a reload.
-const API_VERSION = 4;   // must match server.py API_VERSION
+const API_VERSION = 5;   // must match server.py API_VERSION
 function restartBar(show) {
   let b = $("#restartBar");
   if (!show) { if (b) b.remove(); return; }
@@ -361,6 +361,10 @@ async function restartReelmaker() {
   } else if (!r.ok) return toast("Couldn't restart — try again.", 6000);
   const ov = h("div", { id: "restartOverlay" }, h("div", {}, "↻ Restarting Reelmaker…", h("span", { class: "hint" }, "This page reloads by itself in a few seconds.")));
   document.body.append(ov);
+  await waitForRestart(ov);
+}
+/* wait for the server to go down and come back on the new code, then reload the page */
+async function waitForRestart(ov) {
   const t0 = Date.now(); let down = false;
   while (Date.now() - t0 < 60000) {
     await new Promise((res) => setTimeout(res, 500));
@@ -371,6 +375,81 @@ async function restartReelmaker() {
   ov.firstChild.replaceChildren("Restart is taking longer than usual.", h("span", { class: "hint" }, "Check the Terminal window where Reelmaker runs, or double-click “Start Reelmaker” on your Desktop."));
 }
 $("#restartBtn").onclick = () => restartReelmaker();
+
+/* ------------------------------------------------------------------ updates from GitHub */
+const UPD = { info: null };
+function showUpdateInfo(u) {
+  UPD.info = u;
+  const btn = $("#updateBtn");
+  btn.classList.toggle("hidden", !(u && u.update_available));
+  if (u && u.update_available) btn.title = u.can_apply ? `Update to ${u.latest_short}` + (u.whats_new.length ? ":\n• " + u.whats_new.slice(0, 6).join("\n• ") : "") : (u.reason || "");
+  const date = u && u.latest_date && u.current === u.latest ? " (" + new Date(u.latest_date).toLocaleDateString() + ")" : "";
+  $("#versionText").textContent = u ? `Reelmaker ${u.current_short}${date}` + (u.update_available ? ` — update available (${u.latest_short})` : u.error ? "" : " — up to date") : "Reelmaker";
+}
+async function checkUpdates(force) {
+  const u = await fetch("/api/update" + (force ? "?force=1" : ""), { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  if (u) showUpdateInfo(u);
+  return u;
+}
+async function runUpdate() {
+  let u = UPD.info;
+  if (!u || !u.update_available) return;
+  if (!u.can_apply) return alert(u.reason || "This copy of Reelmaker can't update itself.");
+  const list = u.whats_new.length ? "\n\nWhat's new:\n• " + u.whats_new.slice(0, 12).join("\n• ") : "";
+  if (!confirm(`Update Reelmaker from ${u.current_short} to ${u.latest_short}?${list}\n\nYour reels, edits and settings are kept. ${u.can_restart ? "Reelmaker restarts by itself when it's done" : "Restart Reelmaker when it's done"} (usually under a minute; longer if new tools need downloading).`)) return;
+  await flushSave();
+  const post = (force) => fetch("/api/update/apply", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ force }) });
+  let r = await post(false).catch(() => null);
+  if (r && r.status === 409) {
+    const d = (await r.json().catch(() => ({}))).detail;
+    if (d && d.busy) {
+      if (!confirm(`Reelmaker is still working on: ${d.busy.join(", ")}.\n\nUpdating restarts Reelmaker, which stops that work (use “Retry stopped” / Export again afterwards). Update anyway?`)) return;
+      r = await post(true).catch(() => null);
+    } else return toast(typeof d === "string" ? d : "An update is already running.", 8000);
+  }
+  if (!r || !r.ok) return toast("Couldn't start the update — try again.", 6000);
+  const logEl = h("pre", { class: "updLog" });
+  const title = h("b", {}, "⬆ Updating Reelmaker…");
+  const hint = h("span", { class: "hint" }, "Don't close Reelmaker. This page reloads by itself when it's done.");
+  const box = h("div", { class: "updBox" }, title, hint, logEl);
+  const ov = h("div", { id: "restartOverlay" }, box);
+  document.body.append(ov);
+  while (true) {
+    await new Promise((res) => setTimeout(res, 800));
+    const st = await fetch("/api/update/status", { cache: "no-store" }).then((x) => (x.ok ? x.json() : null)).catch(() => null);
+    if (!st) { title.textContent = "↻ Restarting Reelmaker…"; await waitForRestart(ov); return; }   // server went down: it's restarting
+    logEl.textContent = st.log.join("\n"); logEl.scrollTop = logEl.scrollHeight;
+    if (st.error) {
+      title.textContent = "Update failed";
+      hint.textContent = st.error;
+      box.append(h("button", { class: "small", onclick: () => ov.remove() }, "Close"));
+      return;
+    }
+    if (st.restarting) { title.textContent = "↻ Restarting Reelmaker…"; hint.textContent = "Almost done — this page reloads by itself."; await waitForRestart(ov); return; }
+    if (st.done && st.result && st.result.up_to_date) {
+      title.textContent = "✓ Already up to date"; hint.textContent = "";
+      box.append(h("button", { class: "small", onclick: () => { ov.remove(); checkUpdates(true); } }, "Close"));
+      return;
+    }
+    if (st.done) {
+      title.textContent = "✓ Update installed";
+      hint.textContent = "Restart Reelmaker to use the new version: close its Terminal window and double-click “Start Reelmaker” again.";
+      box.append(h("button", { class: "small", onclick: () => restartReelmaker() }, "Try restarting now"), h("button", { class: "ghost small", onclick: () => ov.remove() }, "Later"));
+      return;
+    }
+  }
+}
+$("#updateBtn").onclick = () => runUpdate();
+$("#checkUpdBtn").onclick = async (e) => {
+  e.preventDefault();
+  $("#versionText").textContent = "Checking for updates…";
+  const u = await checkUpdates(true);
+  if (!u) { $("#versionText").textContent = "Reelmaker"; return toast("Couldn't check for updates (restart Reelmaker if it's an old version).", 6000); }
+  if (u.error) toast(u.error, 7000);
+  else if (u.update_available) runUpdate();
+  else toast(`Reelmaker is up to date (${u.current_short}).`);
+};
+checkUpdates(false); setInterval(() => checkUpdates(false), 3 * 3600e3);
 
 (function watchForUpdate() {
   let mine = null;

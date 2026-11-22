@@ -3,17 +3,19 @@
 # (Windows PCs: double-click Setup.bat instead.)
 # Installs the tools, the Python environment and the AI models Reelmaker needs. Safe to run again: it skips
 # whatever is already done. Options:  --yes (accept the defaults)  --no-voice  --voice  --no-shortcut
+#   --update (used by Reelmaker's Update: no questions, keeps your choices, installs only what's new or missing)
 set -e
 cd "$(dirname "$0")"
 HERE="$PWD"
 
-YES=0; VOICE=ask; SHORTCUT=ask
+YES=0; VOICE=ask; SHORTCUT=ask; UPDATE=0
 for a in "$@"; do
   case "$a" in
     --yes|-y) YES=1 ;;
     --voice) VOICE=yes ;;
     --no-voice) VOICE=no ;;
     --no-shortcut) SHORTCUT=no ;;
+    --update) UPDATE=1; YES=1; VOICE=keep; SHORTCUT=no ;;
     *) echo "Unknown option: $a"; exit 2 ;;
   esac
 done
@@ -41,6 +43,9 @@ if (( FREE_GB < 12 )); then warn "Setup downloads about 8 GB (11 GB with the exp
 # ---------------------------------------------------------------- Homebrew + tools
 step "Homebrew and tools"
 if ! command -v brew >/dev/null && [[ -x /opt/homebrew/bin/brew ]]; then eval "$(/opt/homebrew/bin/brew shellenv)"; fi
+if ! command -v brew >/dev/null && (( UPDATE )); then
+  echo "    Homebrew isn't installed any more. Run Setup.command once to reinstall it."; exit 1
+fi
 if ! command -v brew >/dev/null; then
   echo "    Homebrew (the standard Mac package manager, brew.sh) isn't installed."
   if ask "Install Homebrew now? It asks for your Mac password." y; then
@@ -121,8 +126,10 @@ fi
 # ---------------------------------------------------------------- optional expressive voice
 step "Expressive voice (optional)"
 if [[ -x .venv-tts/bin/python ]] && .venv-tts/bin/python -c "import chatterbox" 2>/dev/null; then
+  (( UPDATE )) && .venv-tts/bin/python -m pip install --quiet -r requirements-voice.txt
   ok "Hype narrator voice (already installed)"
 else
+  if [[ "$VOICE" == keep ]]; then VOICE=no; fi   # update mode: don't add the optional voice unasked
   if [[ "$VOICE" == ask ]]; then
     echo "    The 'Hype narrator' voice sounds the most natural for hooks. Without it, Reelmaker uses its 8 built-in voices."
     ask "Install it? (about 3 GB more)" y && VOICE=yes || VOICE=no

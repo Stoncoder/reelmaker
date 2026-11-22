@@ -18,16 +18,34 @@ hook writing) run locally and free; an optional free online hook writer (Groq) i
 
 ## Install (once)
 
-1. **Get the files**: on GitHub click **Code → Download ZIP** and unzip it (or `git clone` the repo).
-   Put the folder somewhere permanent, e.g. `Documents/Reelmaker`.
-2. **Run setup** — it installs everything Reelmaker needs and asks before anything big:
-   - **Mac**: double-click **`Setup.command`** (or open Terminal in the folder and run `./setup`).
-     If macOS says it can't verify the file, right-click it → **Open**.
-   - **Windows**: double-click **`Setup.bat`**. If Windows shows "Windows protected your PC", click
-     **More info → Run anyway**.
+**Mac** — open **Terminal** (Spotlight → "Terminal"), paste this line and press Return:
 
-   Setup downloads about 9 GB (the AI models) and takes 10–30 minutes the first time. It's safe to run again
-   any time — it only does what's missing. It puts a **Start Reelmaker** shortcut on your Desktop.
+```bash
+curl -fsSL https://raw.githubusercontent.com/Stoncoder/reelmaker/main/install.sh | zsh
+```
+
+**Windows** — open **PowerShell** (Start menu → "PowerShell"), paste this line and press Enter:
+
+```powershell
+irm https://raw.githubusercontent.com/Stoncoder/reelmaker/main/install.ps1 | iex
+```
+
+That's it. The installer downloads Reelmaker into `Documents/Reelmaker` (no git or GitHub account needed),
+then runs setup, which installs everything Reelmaker needs and asks before anything big. Setup downloads about
+9 GB (the AI models) and takes 10–30 minutes the first time. When it's done there's a **Start Reelmaker**
+shortcut on your Desktop.
+
+<details><summary>Other ways to install</summary>
+
+- **ZIP**: on GitHub click **Code → Download ZIP**, unzip it somewhere permanent (e.g. `Documents/Reelmaker`),
+  then double-click **`Setup.command`** (Mac — if macOS says it can't verify the file, right-click it → **Open**)
+  or **`Setup.bat`** (Windows — if it says "Windows protected your PC", click **More info → Run anyway**).
+- **git**: `git clone https://github.com/Stoncoder/reelmaker.git` and run `./setup` (Mac) or `Setup.bat` (Windows).
+- **Another folder**: set `REELMAKER_DIR` first — Mac: `curl -fsSL …/install.sh | REELMAKER_DIR=~/Apps/Reelmaker zsh`,
+  Windows: `$env:REELMAKER_DIR = "D:\Reelmaker"` then the `irm` line.
+
+Setup is safe to run again any time — it only does what's missing.
+</details>
 
 What setup installs: Python 3.12, FFmpeg (full build, for captions), Deno, Ollama and ExifTool (via Homebrew on
 Mac, winget on Windows), the Python packages in `requirements.txt` (in a private `.venv` folder), and the models:
@@ -41,12 +59,21 @@ folder). A small terminal window opens and Reelmaker opens in your browser at ht
 Keep that window open while you work; closing it stops Reelmaker.
 
 - Already running? Double-clicking again just opens it.
-- **⟳ Restart** (top right in Reelmaker) restarts it — use it after updating.
+- **⟳ Restart** (top right in Reelmaker) restarts it.
 
 ## Update
 
-Download the new version over the old folder (or `git pull`), then click **⟳ Restart** in Reelmaker.
-If the update changed `requirements.txt`, run setup again first.
+When a new version is out, a green **⬆ Update** button appears at the top of Reelmaker (it checks GitHub every
+few hours; **Check for updates** at the bottom of the home page checks right now). Click it, read what's new,
+confirm — Reelmaker downloads only the changed files, installs any new packages or models, and restarts itself.
+Your reels, edits, settings and API keys are kept.
+
+Other ways, same result:
+- double-click **`Update.command`** (Mac) or **`Update.bat`** (Windows) in the Reelmaker folder, or
+- run the install line above again — on a computer that already has Reelmaker it updates instead.
+
+Installed with `git clone`? Updates are a `git pull` on the `main` branch; the Update button does that for you
+when you have no local changes.
 
 ## Daily use
 
@@ -110,6 +137,10 @@ Inside each reel folder: `project.json` (all edits), `source/` (the fetched foot
   Quick Sync / AMF, else x264).
 - `setup` / `setup.ps1` install everything; `reelmaker` / `reelmaker.ps1` start it (exit code 75 = restart).
 - Not in the repo (rebuilt by setup): `.venv/`, `.venv-tts/`, `models/`.
+- Installing and updating: `install.sh` / `install.ps1` download a commit as a ZIP and record it in
+  `.reelmaker-version`; `app/updater.py` compares that with the newest commit on `main`, rewrites only the
+  files that changed, then runs `setup --update` / `setup.ps1 -Update` (no questions). Pushing to `main` is
+  what ships an update — everyone's Reelmaker shows **⬆ Update** within a few hours.
 - `.github/workflows/smoke.yml` runs `tests/smoke.py` on macOS and Windows for every push.
 
 ## Credits

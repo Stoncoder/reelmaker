@@ -19,7 +19,7 @@ from .config import (APP_DIR, DEFAULT_VOICE, OLLAMA_MODEL, PRESETS_FILE, VOICES,
 
 app = FastAPI(title="Reelmaker")
 
-API_VERSION = 4   # the page checks this: a page newer than the server shows "restart Reelmaker"
+API_VERSION = 5   # the page checks this: a page newer than the server shows "restart Reelmaker"
 
 
 def _code_stamp() -> float:
@@ -668,9 +668,14 @@ def restart(force: bool = Body(False, embed=True)):
     busy = busy_jobs()
     if busy and not force:
         raise HTTPException(409, {"busy": busy})
+    restart_soon()
+    return {"restarting": True, "interrupted": busy}
 
+
+def restart_soon(delay: float = 0.4) -> None:
+    """Stop everything Reelmaker started and exit with the restart code; the launcher starts it again."""
     def go():
-        time.sleep(0.4)   # let this answer reach the page first
+        time.sleep(delay)   # let the current answer reach the page first
         for procs in list(media.PROCS.values()):
             for pr in list(procs):
                 try:
@@ -684,7 +689,58 @@ def restart(force: bool = Body(False, embed=True)):
                 pass
         os._exit(RESTART_CODE)
     threading.Thread(target=go, daemon=True).start()
-    return {"restarting": True, "interrupted": busy}
+
+
+# ------------------------------------------------------------------ updates (see app/updater.py)
+
+UPDATE: dict = {"running": False, "log": [], "done": False, "error": None, "restarting": False, "result": None}
+
+
+@app.get("/api/update")
+def update_check(force: bool = False):
+    from . import updater
+    info = updater.check(force=force)
+    info["can_restart"] = bool(os.environ.get("REELMAKER_LAUNCHER"))
+    return info
+
+
+@app.get("/api/update/status")
+def update_status():
+    return {**UPDATE, "log": UPDATE["log"][-40:]}
+
+
+@app.post("/api/update/apply")
+def update_apply(force: bool = Body(False, embed=True)):
+    """Install the newest version in the background, then restart (when started by the launcher)."""
+    from . import updater
+    if UPDATE["running"]:
+        raise HTTPException(409, "An update is already running.")
+    busy = busy_jobs()
+    if busy and not force:
+        raise HTTPException(409, {"busy": busy})
+    UPDATE.update(running=True, log=[], done=False, error=None, restarting=False, result=None)
+
+    def say(line: str):
+        import re as _re
+        UPDATE["log"].append(_re.sub(r"\x1b\[[0-9;]*m", "", line))   # no terminal colour codes in the page
+
+    def run():
+        try:
+            res = updater.apply(say)
+            UPDATE["result"] = res
+            if not res.get("up_to_date") and os.environ.get("REELMAKER_LAUNCHER"):
+                say("Restarting Reelmaker onto the new version…")
+                UPDATE["restarting"] = True
+                restart_soon(1.5)
+            elif not res.get("up_to_date"):
+                say("Update installed. Close Reelmaker's window and start it again to use the new version.")
+        except Exception as e:   # UpdateError or anything unexpected: show it, keep running the old version
+            UPDATE["error"] = str(e)[:500]
+            say("Update failed: " + str(e)[:300])
+        finally:
+            UPDATE.update(running=False, done=True)
+    threading.Thread(target=run, daemon=True).start()
+    return {"started": True}
 
 
 @app.get("/api/ui-version")

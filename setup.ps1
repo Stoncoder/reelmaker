@@ -1,7 +1,9 @@
 # Reelmaker setup for Windows 10/11 (64-bit). Easiest: double-click Setup.bat
 # Installs the tools, the Python environment and the AI models Reelmaker needs. Safe to run again: it skips
 # whatever is already done. Options: -Yes (accept the defaults)  -Voice  -NoVoice  -NoShortcut
-param([switch]$Yes, [switch]$Voice, [switch]$NoVoice, [switch]$NoShortcut)
+#   -Update (used by Reelmaker's Update: no questions, keeps your choices, installs only what's new or missing)
+param([switch]$Yes, [switch]$Voice, [switch]$NoVoice, [switch]$NoShortcut, [switch]$Update)
+if ($Update) { $Yes = $true; $NoShortcut = $true }
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"   # Invoke-WebRequest is very slow with its progress bar on
 Set-Location $PSScriptRoot
@@ -133,8 +135,11 @@ Step "Expressive voice (optional)"
 $tpy = Join-Path $Here ".venv-tts\Scripts\python.exe"
 $haveVoice = $false
 if (Test-Path $tpy) { $haveVoice = ((Probe $tpy @("-c", "import chatterbox")).Code -eq 0) }
-if ($haveVoice) { Ok "Hype narrator voice (already installed)" } else {
-  $want = if ($Voice) { $true } elseif ($NoVoice) { $false } else {
+if ($haveVoice) {
+  if ($Update) { Run $tpy @("-m", "pip", "install", "--quiet", "-r", "requirements-voice.txt") }
+  Ok "Hype narrator voice (already installed)"
+} else {
+  $want = if ($Voice) { $true } elseif ($NoVoice -or $Update) { $false } else {
     Write-Host "    The 'Hype narrator' voice sounds the most natural for hooks. Without it, Reelmaker uses its 8 built-in voices."
     Write-Host "    (On a PC without an NVIDIA card it runs on the CPU and takes a while per hook.)"
     Ask "Install it? (about 3 GB more)" $false

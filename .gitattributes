@@ -4,6 +4,7 @@
 setup      text eol=lf
 reelmaker  text eol=lf
 *.command  text eol=lf
+*.sh   text eol=lf
 *.py   text eol=lf
 *.js   text eol=lf
 *.css  text eol=lf
