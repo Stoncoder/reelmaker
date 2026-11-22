@@ -1626,8 +1626,9 @@ async function startWatch(body) {
   if (!S.day) return toast("Create or choose a day folder first (top right) — the reels go there.");
   const btn = $("#watchGo"); btn.disabled = true;
   try {
-    await api("POST", "/api/live/watch", { ...body, day: S.day, per_hour: +$("#watchRate").value, target: 0 });
-    toast(`Auto-clipping started — reels go into “${S.day}” and export by themselves. You can leave this page.`, 7000);
+    const r = await api("POST", "/api/live/watch", { ...body, day: S.day, per_hour: +$("#watchRate").value, target: 0 });
+    toast(r.waiting ? `That stream hasn't started yet — Auto-clip will wait and start clipping by itself when it goes live. Keep Reelmaker running.`
+      : `Auto-clipping started — reels go into “${S.day}” and export by themselves. You can leave this page.`, 8000);
     $("#watchUrl").value = ""; loadWatchers(); window.usageKick && window.usageKick();
   } finally { btn.disabled = false; }
 }
@@ -1646,7 +1647,11 @@ async function loadWatchers() {
   for (const w of list) {
     const st = w.stream || {}, PL = { youtube: "YouTube", twitch: "Twitch", kick: "Kick" }[st.platform] || "";
     let status;
-    if (w.scanning) status = `Scanning for moments… ${Math.round((w.progress || 0) * 100)}%` + (w.task ? ` · ${w.task}` : "");
+    if (w.running && w.state === "waiting") {
+      const left = w.starts ? Math.round((w.starts - Date.now() / 1000) / 60) : null;
+      status = "⏳ Waiting for the stream to go live" + (w.starts ? ` — scheduled ${new Date(w.starts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` +
+        (left > 0 ? ` (in ${left >= 60 ? Math.floor(left / 60) + " h " : ""}${left % 60} min)` : " (any minute now)") : "") + ". Clipping starts by itself.";
+    } else if (w.scanning) status = `Scanning for moments… ${Math.round((w.progress || 0) * 100)}%` + (w.task ? ` · ${w.task}` : "");
     else if (w.running && w.next_check) status = `Watching — next look in ${Math.max(0, Math.round((w.next_check - Date.now() / 1000) / 60))} min`;
     else if (w.running) status = "Starting…";
     else status = { ended: "Stream ended — finished", stopped: "Stopped", error: "Stopped by an error" }[w.state] || w.state;

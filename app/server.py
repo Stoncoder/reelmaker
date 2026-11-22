@@ -789,12 +789,17 @@ def _keep_awake(on: bool, w: dict):
     """macOS: don't let the Mac fall asleep while a stream is being auto-clipped (the screen may still turn off)."""
     if on and system.IS_MAC and not w.get("awake"):
         try:
-            w["awake"] = subprocess.Popen(["caffeinate", "-i"])
+            # -w: caffeinate ends by itself when this server process ends (restart, crash, Ctrl+C) — never left behind
+            w["awake"] = subprocess.Popen(["caffeinate", "-i", "-w", str(os.getpid())])
         except Exception:
             w["awake"] = None
     elif not on and w.get("awake"):
         w["awake"].terminate()
         w["awake"] = None
+
+
+class _Stopped(Exception):
+    pass
 
 
 def _wait(stop, seconds: float) -> bool:
@@ -814,6 +819,35 @@ def watcher(wid: str):
     try:
         p = load(d)
         st, day = p["stream"], p["day"]
+        if not st.get("clip_url"):                       # scheduled stream: wait until it goes live
+            log(d, f"Waiting for {st.get('creator') or 'the stream'} to go live"
+                   + (f" (scheduled {time.strftime('%H:%M', time.localtime(p['starts']))})" if p.get("starts") else "")
+                   + ". Clipping starts by itself.")
+            update(d, state="waiting")
+            gave_up = time.time() + 24 * 3600
+            while not stop.is_set() and time.time() < gave_up:
+                starts = load(d).get("starts") or 0
+                left = starts - time.time()
+                # far away: look every 10 min; close to the start (or late): every minute
+                nap = 600 if left > 900 else 60
+                set_job(d, stage="ready", progress=1.0, task=None, span=None, next_check=time.time() + nap)
+                try:
+                    st = live.resolve(st["watch_url"])
+                    break
+                except live.Upcoming as e:
+                    update(d, starts=e.info.get("starts"))
+                except Exception:
+                    pass
+                if _wait(stop, nap):
+                    break
+            if stop.is_set():
+                raise _Stopped()
+            if not st.get("clip_url"):
+                update(d, state="ended")
+                log(d, "The stream didn't start within 24 hours. Auto-clip stopped.")
+                return
+            update(d, stream={**load(d)["stream"], **{k: st.get(k) for k in ("creator", "platform", "title", "clip_url", "thumbnail")}})
+            log(d, f"{st.get('creator') or 'The stream'} is live! Auto-clipping begins.")
         per_chunk = max(1, round(p.get("per_hour", 4) * WATCH_CHUNK / 3600))
         src = {"type": "youtube", "url": st["clip_url"], "live": st["platform"] == "youtube"}
         update(d, state="watching", error=None)
@@ -893,6 +927,9 @@ def watcher(wid: str):
         if stop.is_set():
             update(d, state="stopped")
             log(d, "Stopped.")
+    except _Stopped:
+        update(d, state="stopped")
+        log(d, "Stopped.")
     except Exception as e:
         traceback.print_exc()
         update(d, state="error", error=str(e)[:1500])
@@ -940,15 +977,23 @@ def start_watcher(wid: str):
 def api_watch_start(body: dict = Body(...)):
     """Start auto-clipping a live stream: pass a stream from the Live tab, or {"url": any live link}."""
     st = body.get("stream")
+    waiting = None
     if not st and body.get("url"):
         try:
             st = live.resolve(body["url"])
+        except live.Upcoming as e:            # scheduled: wait for it to go live, then clip by itself
+            waiting = e.info
+            st = {"creator": e.info["creator"], "platform": "youtube", "handle": "", "title": e.info["title"],
+                  "clip_url": None, "watch_url": body["url"], "thumbnail": e.info["thumbnail"]}
         except media.MediaError as e:
             raise HTTPException(400, str(e))
-    if not st or not st.get("clip_url"):
+        except Exception as e:
+            raise HTTPException(400, f"Couldn't open that link: {str(e).splitlines()[0][:200]}")
+    if not st or not (st.get("clip_url") or waiting):
         raise HTTPException(400, "That stream can't be clipped (no recording of it is available).")
     for wid, w in WATCHERS.items():
-        if load(watch_dir() / wid).get("stream", {}).get("clip_url") == st["clip_url"]:
+        o = load(watch_dir() / wid).get("stream", {})
+        if (st.get("clip_url") and o.get("clip_url") == st["clip_url"]) or (waiting and o.get("watch_url") == st["watch_url"]):
             raise HTTPException(409, "This stream is already being auto-clipped.")
     day = body.get("day") or ""
     if not day or not (reels_root() / day).is_dir():
@@ -958,21 +1003,21 @@ def api_watch_start(body: dict = Body(...)):
     d.mkdir()
     keep = {k: st.get(k) for k in ("creator", "platform", "handle", "title", "clip_url", "watch_url", "thumbnail")}
     save(d, {"stream": keep, "day": day, "per_hour": int(min(12, max(1, int(body.get("per_hour") or 4)))),
-             "target": int(body.get("target") or 0), "state": "starting", "log": [], "created": time.time(),
-             "reels": [], "clipped": []})
+             "target": int(body.get("target") or 0), "state": "waiting" if waiting else "starting", "log": [],
+             "created": time.time(), "reels": [], "clipped": [], "starts": (waiting or {}).get("starts")})
     start_watcher(wid)
-    return {"id": wid}
+    return {"id": wid, "waiting": bool(waiting), "starts": (waiting or {}).get("starts")}
 
 
 @app.get("/api/live/watch")
 def api_watch_list():
     out = []
-    for d in sorted(watch_dir().iterdir(), reverse=True)[:20]:
+    for d in sorted((x for x in watch_dir().iterdir() if x.is_dir()), reverse=True)[:20]:
         p = load(d)
         if not p:
             continue
         running = d.name in WATCHERS
-        if not running and p.get("state") in ("watching", "starting"):
+        if not running and p.get("state") in ("watching", "starting", "waiting"):
             p["state"] = "stopped"
         j = JOBS.get(rid(d), {})
         out.append({"id": d.name, "stream": p.get("stream"), "day": p.get("day"), "state": p.get("state"),
@@ -980,7 +1025,7 @@ def api_watch_list():
                     "position": p.get("position"), "next_check": j.get("next_check"), "error": p.get("error"),
                     "scanning": running and j.get("stage") in ("locate", "cut"), "progress": j.get("progress"),
                     "task": (j.get("task") or {}).get("label"), "log": (p.get("log") or [])[-6:],
-                    "per_hour": p.get("per_hour"), "created": p.get("created")})
+                    "per_hour": p.get("per_hour"), "created": p.get("created"), "starts": p.get("starts")})
     return {"watchers": out}
 
 
@@ -997,8 +1042,10 @@ def _resume_watchers():
     """Auto-clipping that was running when Reelmaker restarted (an update, ⟳ Restart) carries on by itself."""
     try:
         for d in watch_dir().iterdir():
+            if not d.is_dir():
+                continue
             p = load(d)
-            if p.get("state") in ("watching", "starting") and time.time() - p.get("updated", 0) < 6 * 3600:
+            if p.get("state") in ("watching", "starting", "waiting") and time.time() - p.get("updated", 0) < 6 * 3600:
                 start_watcher(d.name)
     except Exception:
         traceback.print_exc()

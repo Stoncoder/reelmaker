@@ -25,6 +25,13 @@ class LiveError(media.MediaError):
     pass
 
 
+class Upcoming(LiveError):
+    """A scheduled stream that hasn't started yet. .info has creator/title/thumbnail/starts (unix time or None)."""
+    def __init__(self, msg, info):
+        super().__init__(msg)
+        self.info = info
+
+
 class _Quiet:
     """yt-dlp prints errors like "The channel is not currently live" even when quiet; we expect those."""
     def debug(self, msg): pass
@@ -291,10 +298,20 @@ def resolve(url: str) -> dict:
         if not s:
             raise LiveError(f"{m.group(1)} isn't live on YouTube right now.")
         return s
-    with yt_dlp.YoutubeDL({**Q, "noplaylist": True}) as y:          # a specific video / VOD / live URL
-        d = y.extract_info(u, download=False, process=False)
+    try:
+        with yt_dlp.YoutubeDL({**Q, "noplaylist": True, "ignore_no_formats_error": True}) as y:   # a specific video / live URL
+            d = y.extract_info(u, download=False, process=False)
+    except Exception as e:
+        msg = re.sub(r"^ERROR:\s*(\[[^\]]+\]\s*)?([\w-]+:\s*)?", "", str(e).splitlines()[0]).strip()
+        raise LiveError(f"Couldn't open that link: {msg[:200]}")
+    if d.get("live_status") == "is_upcoming":
+        starts = d.get("release_timestamp")
+        info = {"creator": d.get("channel") or d.get("uploader") or "", "title": d.get("fulltitle") or d.get("title") or "",
+                "thumbnail": d.get("thumbnail"), "starts": starts, "watch_url": u}
+        when = f" in about {_mins(starts - time.time())}" if starts else ""
+        raise Upcoming(f"{info['creator'] or 'This stream'} goes live{when}.", info)
     if not (d.get("is_live") or d.get("live_status") == "is_live"):
-        raise LiveError("That link isn't a live stream that's running right now.")
+        raise LiveError("That link isn't a live stream that's running right now (it's a normal video or the stream has ended).")
     plat = "twitch" if "twitch.tv" in u else "kick" if "kick.com" in u else "youtube"
     started = d.get("release_timestamp") or d.get("timestamp")
     clip = f"https://www.youtube.com/watch?v={d['id']}" if plat == "youtube" else u.split("?")[0]
@@ -302,6 +319,12 @@ def resolve(url: str) -> dict:
             "title": d.get("fulltitle") or d.get("title") or "", "viewers": d.get("concurrent_view_count"),
             "started": started, "uptime": (time.time() - started) if started else None,
             "thumbnail": d.get("thumbnail"), "watch_url": u, "clip_url": clip, "note": None}
+
+
+def _mins(sec: float) -> str:
+    sec = max(0, int(sec))
+    h, m = sec // 3600, (sec % 3600) // 60
+    return f"{h} h {m} min" if h else f"{max(1, m)} min"
 
 
 def still_live(s: dict) -> bool:
