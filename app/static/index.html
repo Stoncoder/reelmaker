@@ -93,6 +93,15 @@
       <button id="liveRefresh" class="small">↻ Check again</button>
       <button id="liveEdit" class="ghost small">Edit creators</button></div>
     <p class="hint">Your creators who are live on YouTube, Twitch and Kick right now. Pick a stream → the app finds its best moments → you tick the ones you want → they're clipped into reels. It only checks when this page is open. Always follow each creator's clipping rules.</p>
+    <div class="autoBox">
+      <b>🤖 Auto-clip a live stream</b> <span class="hint">— hands-free: it checks the stream every 10 minutes, picks the best moments, edits them and exports the MP4s by itself, until the stream ends or you stop it.</span>
+      <div class="row gap">
+        <input id="watchUrl" class="grow" placeholder="Paste any live link (YouTube, Twitch or Kick) — or use 🤖 Auto-clip on a stream below">
+        <label>Reels per hour <select id="watchRate"><option value="2">2</option><option value="4" selected>4</option><option value="6">6</option><option value="8">8</option></select></label>
+        <button id="watchGo" class="primary">🤖 Start auto-clipping</button>
+      </div>
+      <div id="watchList"></div>
+    </div>
     <div id="creatorEdit" class="hidden">
       <p class="hint">One creator per line: <b>Name | YouTube handle | Twitch name | Kick name</b> (leave a part empty if they're not on that platform).</p>
       <textarea id="creatorsIn" rows="8" class="mono"></textarea>

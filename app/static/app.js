@@ -334,7 +334,7 @@ $("#homeLink").onclick = (e) => { e.preventDefault(); location.hash = ""; };
     bar.classList.toggle("hidden", !busy);
     if (busy) {
       const a = act[0];
-      const isLive = a.day === "live-search";
+      const isLive = a.day === "live-search" || a.day === "live-watch";
       $("#ubLabel").textContent = `${a.label} · ${isLive ? "live search" : a.reel.replace(/^reel-(\d+).*/, "reel $1")}`;
       $("#ubTaskBar").style.width = `${((a.progress || 0) * 100).toFixed(1)}%`;
       $("#ubPct").textContent = a.waiting ? "" : `${Math.floor((a.progress || 0) * 100)}%`;
@@ -1508,6 +1508,7 @@ async function openLive(refresh = false) {
     drawLive(r);
   } finally { $("#liveRefresh").disabled = false; }
   if (LV.search) pollSearch();
+  loadWatchers();
 }
 function drawLive(r) {
   const grid = $("#liveGrid"); grid.innerHTML = "";
@@ -1522,7 +1523,8 @@ function drawLive(r) {
       h("div", { class: "hint" }, [s.viewers ? `${s.viewers.toLocaleString()} watching` : null, s.uptime ? `live for ${ago(s.uptime)}` : null].filter(Boolean).join(" · ")),
       s.note ? h("div", { class: "hint err" }, s.note) : null,
       h("div", { class: "row" },
-        h("button", { class: "small primary", disabled: !s.clip_url, onclick: () => pickStream(s) }, "Clip this stream"),
+        h("button", { class: "small primary", disabled: !s.clip_url, onclick: () => startWatch({ stream: s }) }, "🤖 Auto-clip"),
+        h("button", { class: "small", disabled: !s.clip_url, onclick: () => pickStream(s) }, "Pick moments myself"),
         h("a", { class: "ghost small linkbtn", href: s.watch_url, target: "_blank", rel: "noopener" }, "Watch ↗")));
     grid.append(card);
   });
@@ -1618,3 +1620,47 @@ async function saveCreators(list) {
 $("#creatorSave").onclick = () => saveCreators($("#creatorsIn").value.split("\n").map((l) => l.split("|").map((x) => x.trim()))
   .filter((x) => x[0]).map(([name, youtube, twitch, kick]) => ({ name, youtube, twitch, kick })));
 $("#creatorReset").onclick = () => { if (confirm("Go back to the built-in creator list?")) saveCreators([]); };
+
+/* Live tab ▸ Auto-clip: a watcher per stream makes and exports reels by itself until the stream ends or you stop it */
+async function startWatch(body) {
+  if (!S.day) return toast("Create or choose a day folder first (top right) — the reels go there.");
+  const btn = $("#watchGo"); btn.disabled = true;
+  try {
+    await api("POST", "/api/live/watch", { ...body, day: S.day, per_hour: +$("#watchRate").value, target: 0 });
+    toast(`Auto-clipping started — reels go into “${S.day}” and export by themselves. You can leave this page.`, 7000);
+    $("#watchUrl").value = ""; loadWatchers(); window.usageKick && window.usageKick();
+  } finally { btn.disabled = false; }
+}
+$("#watchGo").onclick = () => {
+  const url = $("#watchUrl").value.trim();
+  if (!/^https?:\/\//.test(url)) return toast("Paste a full live link (https://…), or click 🤖 Auto-clip on a stream below.");
+  startWatch({ url });
+};
+async function loadWatchers() {
+  clearTimeout(LV.wpoll);
+  if (location.hash !== "#/live") return;
+  const r = await api("GET", "/api/live/watch").catch(() => null);
+  if (!r) return;
+  const box = $("#watchList"); box.innerHTML = "";
+  const list = r.watchers.filter((w) => w.running || Date.now() / 1000 - (w.created || 0) < 24 * 3600);
+  for (const w of list) {
+    const st = w.stream || {}, PL = { youtube: "YouTube", twitch: "Twitch", kick: "Kick" }[st.platform] || "";
+    let status;
+    if (w.scanning) status = `Scanning for moments… ${Math.round((w.progress || 0) * 100)}%` + (w.task ? ` · ${w.task}` : "");
+    else if (w.running && w.next_check) status = `Watching — next look in ${Math.max(0, Math.round((w.next_check - Date.now() / 1000) / 60))} min`;
+    else if (w.running) status = "Starting…";
+    else status = { ended: "Stream ended — finished", stopped: "Stopped", error: "Stopped by an error" }[w.state] || w.state;
+    const last = (w.log || []).slice(-1)[0] || "";
+    box.append(h("div", { class: "watchRow" + (w.running ? " on" : "") },
+      h("div", { class: "row" },
+        h("span", { class: "dot" + (w.running ? " live" : "") }),
+        h("b", { class: "grow" }, `${st.creator || ""} · ${PL}`, h("span", { class: "hint" }, `  → ${w.day} · ${w.per_hour}/hour`)),
+        w.running ? h("button", { class: "ghost small danger", onclick: async () => { await api("POST", `/api/live/watch/${w.id}/stop`); toast("Stopping auto-clip…"); setTimeout(loadWatchers, 800); } }, "Stop") : null),
+      h("div", { class: "hint" }, status + (w.chunks ? ` · ${w.chunks} part${w.chunks > 1 ? "s" : ""} checked` : "")),
+      w.error ? h("div", { class: "err" }, w.error.split("\n")[0]) : null,
+      w.reels.length ? h("div", { class: "row wrap" }, h("span", { class: "hint" }, `${w.reels.length} reel${w.reels.length > 1 ? "s" : ""}:`),
+        ...w.reels.map((x) => h("a", { class: "chip", href: `#/${enc(w.day)}/${enc(x.folder)}`, title: x.scenario }, x.folder.replace(/^reel-(\d+)-?/, "#$1 ").replace(/-/g, " ").slice(0, 34)))) : null,
+      last ? h("div", { class: "hint small" }, last.slice(9)) : null));
+  }
+  if (r.watchers.some((w) => w.running)) LV.wpoll = setTimeout(loadWatchers, 5000);
+}

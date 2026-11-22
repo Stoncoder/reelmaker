@@ -42,6 +42,9 @@ def _stop_everything():
         ai.stop_voice_worker()
     except Exception:
         pass
+    for w in list(WATCHERS.values()):
+        if w.get("awake"):
+            w["awake"].terminate()
     try:
         from . import sysmon
         sysmon.stop()
@@ -766,6 +769,239 @@ def api_live_approve(sid: str, body: dict = Body(...)):
     r = create_reels(body["day"], req)
     update(d, approved=sorted(pick), approved_day=body["day"])
     return r
+
+
+# ------------------------------------------------------------------ Auto-clip: watch a live stream, make reels by itself
+
+WATCH_CHUNK = 10 * 60      # look at the stream every 10 minutes of new footage
+WATCH_OVERLAP = 60         # re-check the last minute of the previous chunk, so a moment on the edge isn't cut in half
+WATCHERS: dict[str, dict] = {}   # id -> {"stop": Event, "thread": Thread, "awake": Popen}
+
+
+def watch_dir() -> Path:
+    from .config import DATA_DIR
+    d = DATA_DIR / "live-watch"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _keep_awake(on: bool, w: dict):
+    """macOS: don't let the Mac fall asleep while a stream is being auto-clipped (the screen may still turn off)."""
+    if on and system.IS_MAC and not w.get("awake"):
+        try:
+            w["awake"] = subprocess.Popen(["caffeinate", "-i"])
+        except Exception:
+            w["awake"] = None
+    elif not on and w.get("awake"):
+        w["awake"].terminate()
+        w["awake"] = None
+
+
+def _wait(stop, seconds: float) -> bool:
+    """Sleep, but wake up at once when Stop is clicked. True = stop."""
+    return stop.wait(seconds)
+
+
+def _overlaps(m: dict, done: list) -> bool:
+    return any(m["start"] < b - 5 and m["end"] > a + 5 for a, b in done)
+
+
+def watcher(wid: str):
+    d = watch_dir() / wid
+    w = WATCHERS[wid]
+    stop = w["stop"]
+    _keep_awake(True, w)
+    try:
+        p = load(d)
+        st, day = p["stream"], p["day"]
+        per_chunk = max(1, round(p.get("per_hour", 4) * WATCH_CHUNK / 3600))
+        src = {"type": "youtube", "url": st["clip_url"], "live": st["platform"] == "youtube"}
+        update(d, state="watching", error=None)
+        log(d, f"Auto-clipping {st['creator']} ({st['platform'].title()}): every {WATCH_CHUNK // 60} min of new stream, "
+               f"up to {per_chunk} reel{'s' if per_chunk > 1 else ''} into “{day}”, exported automatically.")
+        ended_checks = 0
+        while not stop.is_set():
+            p = load(d)
+            try:
+                head = live.stream_position(st)
+            except Exception as e:
+                log(d, f"Couldn't reach the stream ({str(e).splitlines()[0][:100]}); trying again in a minute.")
+                if _wait(stop, 60):
+                    break
+                continue
+            start = p.get("next_start")
+            if start is None:                       # begin with the last chunk that's already streamed
+                start = max(0.0, head - WATCH_CHUNK - 15)
+                update(d, next_start=start)
+            end = head - 15
+            live_now = live.still_live(st)
+            if end - start < WATCH_CHUNK and live_now:
+                wait = max(30.0, WATCH_CHUNK - (end - start))
+                set_job(d, stage="ready", progress=1.0, task=None, span=None, next_check=time.time() + wait)
+                update(d, next_check=time.time() + wait, position=head)
+                if _wait(stop, min(wait, 120)):       # check at least every 2 min whether the stream ended
+                    break
+                continue
+            if end - start < 60:                     # stream ended and nothing new left to scan
+                ended_checks += 1
+                if ended_checks >= 2:
+                    update(d, state="ended")
+                    log(d, "The stream has ended. Auto-clipping stopped.")
+                    break
+                if _wait(stop, 60):
+                    break
+                continue
+            # ---- scan the new part (queued with the other reels so only one heavy job runs at a time)
+            a, b = max(0.0, start - WATCH_OVERLAP), end
+            log(d, f"Scanning {fmt_time(a)}–{fmt_time(b)} for the best moments…")
+            fut = PIPE.submit(_watch_scan, d, src, a, b, per_chunk, st["creator"], p.get("target") or 0)
+            while not fut.done():
+                if _wait(stop, 1):
+                    media.cancel(rid(d))
+                    break
+            if stop.is_set():
+                break
+            try:
+                found = fut.result()
+            except Exception as e:
+                log(d, f"Scan failed ({str(e).splitlines()[0][:150]}); will try this part again in a minute.")
+                if _wait(stop, 60):
+                    break
+                continue
+            done = [tuple(x) for x in (p.get("clipped") or [])]
+            new = [m for m in found if not _overlaps(m, done)]
+            if new:
+                r = create_reels(day, {"source": {"type": "youtube", "url": st["clip_url"]}, "creator": st["creator"],
+                                       "target": p.get("target") or 0, "auto_export": True,
+                                       "moments": [{"ranges": [{"start": m["start"], "end": m["end"]}],
+                                                    "scenario": m.get("scenario") or ""} for m in new]})
+                p = load(d)
+                reels = (p.get("reels") or []) + [{"folder": f, "start": m["start"], "end": m["end"], "scenario": m.get("scenario", "")}
+                                                  for f, m in zip(r["created"], new)]
+                update(d, reels=reels, clipped=done + [[m["start"], m["end"]] for m in new])
+                log(d, f"Found {len(new)} moment{'s' if len(new) > 1 else ''}: " + "; ".join(
+                    f"{fmt_time(m['start'])} {m.get('scenario') or 'big moment'}"[:90] for m in new) + " — making the reels now.")
+            else:
+                log(d, "Nothing strong enough in this part.")
+            update(d, next_start=b, chunks=(p.get("chunks") or 0) + 1)
+            if not live_now and b >= head - 30:
+                update(d, state="ended")
+                log(d, "The stream has ended and its last part is clipped. Auto-clipping stopped.")
+                break
+        else:
+            pass
+        if stop.is_set():
+            update(d, state="stopped")
+            log(d, "Stopped.")
+    except Exception as e:
+        traceback.print_exc()
+        update(d, state="error", error=str(e)[:1500])
+        log(d, "Stopped: " + str(e).splitlines()[0][:200])
+    finally:
+        _keep_awake(False, w)
+        set_job(d, stage="ready", progress=1.0, task=None, span=None, next_check=None)
+        WATCHERS.pop(wid, None)
+
+
+def _watch_scan(d: Path, src: dict, a: float, b: float, count: int, creator: str, target: int) -> list:
+    media.CTX.tag = rid(d)
+    media.CTX.report = lambda info: report(d, info)
+    media.CANCELLED.discard(rid(d))
+    try:
+        set_job(d, progress=0.0, task=None, span=None, started=time.time(), next_check=None,
+                plan={"locate": (0.0, 0.9), "cut": (0.9, 1.0)})
+        stage(d, "locate")
+        scan = full_scan(d, src, {"start": a, "end": b})
+        stage(d, "cut")
+        found = story.locate(scan["words"], scan["profile"], scan["motion"], scan["duration"], [], count, creator, target)
+        off = scan.get("offset", 0.0)
+        for c in found:
+            c["start"] = round(c["start"] + off, 1); c["end"] = round(c["end"] + off, 1)
+        set_job(d, stage="ready", progress=1.0, task=None, span=None)
+        # the scan copy is only needed once: don't let a long stream fill the disk
+        from .config import DATA_DIR
+        for f in (DATA_DIR / "cache" / source_key(src)).glob(f"window-{int(a)}-{int(b)}*.mp4"):
+            f.unlink(missing_ok=True)
+        return found
+    finally:
+        media.CTX.tag = None
+        media.CTX.report = None
+
+
+def start_watcher(wid: str):
+    import threading as _th
+    WATCHERS[wid] = {"stop": _th.Event(), "awake": None}
+    t = _th.Thread(target=watcher, args=(wid,), daemon=True, name=f"watch-{wid}")
+    WATCHERS[wid]["thread"] = t
+    t.start()
+
+
+@app.post("/api/live/watch")
+def api_watch_start(body: dict = Body(...)):
+    """Start auto-clipping a live stream: pass a stream from the Live tab, or {"url": any live link}."""
+    st = body.get("stream")
+    if not st and body.get("url"):
+        try:
+            st = live.resolve(body["url"])
+        except media.MediaError as e:
+            raise HTTPException(400, str(e))
+    if not st or not st.get("clip_url"):
+        raise HTTPException(400, "That stream can't be clipped (no recording of it is available).")
+    for wid, w in WATCHERS.items():
+        if load(watch_dir() / wid).get("stream", {}).get("clip_url") == st["clip_url"]:
+            raise HTTPException(409, "This stream is already being auto-clipped.")
+    day = body.get("day") or ""
+    if not day or not (reels_root() / day).is_dir():
+        raise HTTPException(400, "Choose a day folder first (top right).")
+    wid = time.strftime("%Y%m%d-%H%M%S") + "-" + analysis.uid()[:4]
+    d = watch_dir() / wid
+    d.mkdir()
+    keep = {k: st.get(k) for k in ("creator", "platform", "handle", "title", "clip_url", "watch_url", "thumbnail")}
+    save(d, {"stream": keep, "day": day, "per_hour": int(min(12, max(1, int(body.get("per_hour") or 4)))),
+             "target": int(body.get("target") or 0), "state": "starting", "log": [], "created": time.time(),
+             "reels": [], "clipped": []})
+    start_watcher(wid)
+    return {"id": wid}
+
+
+@app.get("/api/live/watch")
+def api_watch_list():
+    out = []
+    for d in sorted(watch_dir().iterdir(), reverse=True)[:20]:
+        p = load(d)
+        if not p:
+            continue
+        running = d.name in WATCHERS
+        if not running and p.get("state") in ("watching", "starting"):
+            p["state"] = "stopped"
+        j = JOBS.get(rid(d), {})
+        out.append({"id": d.name, "stream": p.get("stream"), "day": p.get("day"), "state": p.get("state"),
+                    "running": running, "reels": p.get("reels") or [], "chunks": p.get("chunks") or 0,
+                    "position": p.get("position"), "next_check": j.get("next_check"), "error": p.get("error"),
+                    "scanning": running and j.get("stage") in ("locate", "cut"), "progress": j.get("progress"),
+                    "task": (j.get("task") or {}).get("label"), "log": (p.get("log") or [])[-6:],
+                    "per_hour": p.get("per_hour"), "created": p.get("created")})
+    return {"watchers": out}
+
+
+@app.post("/api/live/watch/{wid}/stop")
+def api_watch_stop(wid: str):
+    w = WATCHERS.get(safe_name(wid))
+    if w:
+        w["stop"].set()
+    return {"ok": True}
+
+
+@app.on_event("startup")
+def _resume_watchers():
+    """Auto-clipping that was running when Reelmaker restarted (an update, ⟳ Restart) carries on by itself."""
+    try:
+        for d in watch_dir().iterdir():
+            p = load(d)
+            if p.get("state") in ("watching", "starting") and time.time() - p.get("updated", 0) < 6 * 3600:
+                start_watcher(d.name)
+    except Exception:
+        traceback.print_exc()
 
 
 @app.get("/api/state")

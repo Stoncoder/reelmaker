@@ -266,3 +266,50 @@ def stream_position(s: dict) -> float:
     if v.get("duration"):
         return float(v["duration"])
     return float(s.get("uptime") or 0)
+
+
+def resolve(url: str) -> dict:
+    """Any live link (YouTube watch/live/@channel, Twitch channel or video, Kick channel or video) -> stream info,
+    the same shape the Live tab cards use. Raises LiveError if it isn't live (or can't be clipped)."""
+    import yt_dlp
+    u = url.strip()
+    m = re.search(r"twitch\.tv/(?!videos/)([A-Za-z0-9_]+)", u)
+    if m:
+        s = _check({"name": m.group(1), "twitch": m.group(1)}, "twitch")
+        if not s:
+            raise LiveError(f"{m.group(1)} isn't live on Twitch right now.")
+        return s
+    m = re.search(r"kick\.com/([A-Za-z0-9_-]+)/?$", u)
+    if m:
+        s = _check({"name": m.group(1), "kick": m.group(1)}, "kick")
+        if not s:
+            raise LiveError(f"{m.group(1)} isn't live on Kick right now.")
+        return s
+    m = re.search(r"youtube\.com/(@[\w.-]+)(?:/live)?/?(?:\?.*)?$", u)
+    if m:
+        s = _check({"name": m.group(1), "youtube": m.group(1)}, "youtube")
+        if not s:
+            raise LiveError(f"{m.group(1)} isn't live on YouTube right now.")
+        return s
+    with yt_dlp.YoutubeDL({**Q, "noplaylist": True}) as y:          # a specific video / VOD / live URL
+        d = y.extract_info(u, download=False, process=False)
+    if not (d.get("is_live") or d.get("live_status") == "is_live"):
+        raise LiveError("That link isn't a live stream that's running right now.")
+    plat = "twitch" if "twitch.tv" in u else "kick" if "kick.com" in u else "youtube"
+    started = d.get("release_timestamp") or d.get("timestamp")
+    clip = f"https://www.youtube.com/watch?v={d['id']}" if plat == "youtube" else u.split("?")[0]
+    return {"creator": d.get("channel") or d.get("uploader") or "", "platform": plat, "handle": "",
+            "title": d.get("fulltitle") or d.get("title") or "", "viewers": d.get("concurrent_view_count"),
+            "started": started, "uptime": (time.time() - started) if started else None,
+            "thumbnail": d.get("thumbnail"), "watch_url": u, "clip_url": clip, "note": None}
+
+
+def still_live(s: dict) -> bool:
+    """Is the stream still running? (YouTube: its live status; Twitch/Kick: the recording is still marked live.)"""
+    import yt_dlp
+    try:
+        with yt_dlp.YoutubeDL({**Q, "noplaylist": True}) as y:
+            d = y.extract_info(s["clip_url"], download=False, process=False)
+        return bool(d.get("is_live") or d.get("live_status") == "is_live")
+    except Exception:
+        return True      # a network hiccup isn't the end of the stream; the next check decides
