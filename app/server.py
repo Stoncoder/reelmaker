@@ -617,7 +617,19 @@ def state():
             "presets": presets(), "creator": s.get("creator", ""), "target": s.get("target", 0),
             "auto_export": s.get("auto_export", True), "voice_default": voice_default(), "ffmpeg": ffmpeg_status(),
             "platform": "mac" if system.IS_MAC else "windows" if system.IS_WIN else "other",
-            "voice_default_saved": bool(s.get("voice_default"))}
+            "voice_default_saved": bool(s.get("voice_default")), "pronounce": ai.user_pronunciations()}
+
+
+@app.put("/api/pronounce")
+def set_pronounce(body: dict = Body(...)):
+    """Text like "ISHOWSPEED = I Show Speed", one per line -> {written: said}."""
+    table = {}
+    for line in str(body.get("text", "")).splitlines()[:100]:
+        name, sep, say = line.partition("=")
+        if sep and name.strip() and say.strip():
+            table[name.strip()[:60]] = say.strip()[:80]
+    save_settings(pronounce=table)
+    return {"pronounce": table}
 
 
 @app.get("/api/system")

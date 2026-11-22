@@ -995,6 +995,8 @@ function drawHook() {
   $("#hookLinked").checked = !!k.linked; $("#hookVoiceText").disabled = !!k.linked;
   const vs = $("#voiceSel"); vs.innerHTML = "";
   for (const [id, label] of Object.entries(S.st.voices)) vs.append(h("option", { value: id, selected: id === k.voice }, label));
+  if (document.activeElement !== $("#sayIn"))
+    $("#sayIn").value = Object.entries(S.st.pronounce || {}).map(([a, b]) => `${a} = ${b}`).join("\n");
   $("#cbRow").classList.toggle("hidden", k.voice !== "cb" || !!k.voice_file);
   $("#refLbl").textContent = k.voice_ref ? "Matching: " + k.voice_ref.split("/").pop() : "Default narrator voice";
   $("#refClear").classList.toggle("hidden", !k.voice_ref);
@@ -1385,3 +1387,13 @@ $("#draftBtn").onclick = () => startRender(false);
 $("#finalBtn").onclick = () => startRender(true);
 
 route();
+
+/* Hook ▸ "Say names right": your own pronunciations, used by every voice in every reel */
+$("#saySave").onclick = async () => {
+  const r = await api("PUT", "/api/pronounce", { text: $("#sayIn").value });
+  S.st.pronounce = r.pronounce;
+  $("#sayIn").value = Object.entries(r.pronounce).map(([a, b]) => `${a} = ${b}`).join("\n");
+  $("#sayState").textContent = `Saved ${Object.keys(r.pronounce).length} name${Object.keys(r.pronounce).length === 1 ? "" : "s"}.`;
+  changed();             // the reel's voice needs a new preview
+  $("#ttsBtn").click();  // and play it with the fix right away
+};

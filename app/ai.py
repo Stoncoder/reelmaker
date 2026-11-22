@@ -105,8 +105,42 @@ ACRONYMS = {"GTA", "NPC", "NPCS", "RP", "VR", "AI", "FBI", "CIA", "USA", "UK", "
              "OG", "DM", "TV", "ID", "ATM", "CEO", "NBA", "NFL", "UFC", "WWE", "IRL", "AFK", "GG", "RPG", "XP", "HP", "KO"}
 
 
+# How to SAY names the voice gets wrong (matched as whole words, any capitalisation, also with 's).
+# Users add their own in Hook ▸ Voice settings ▸ "Say names right" (saved as settings["pronounce"]).
+SAY_AS = {
+    "ISHOWSPEED": "I Show Speed", "IShowSpeed": "I Show Speed", "SHOWSPEED": "Show Speed",
+    "KAI CENAT": "Kai Senat", "CENAT": "Senat",
+    "ADIN ROSS": "Aiden Ross", "XQC": "X Q C", "NICKMERCS": "Nick Mercs", "TIMTHETATMAN": "Tim the Tatman",
+    "DRDISRESPECT": "Doctor Disrespect", "SYPHERPK": "Sypher P K", "MRBEAST": "Mister Beast",
+    "AMP": "Amp", "LUCIA": "Loo-see-ah", "LEONIDA": "Lee-oh-nee-dah",
+}
+
+
+def say_names(text: str, extra: dict | None = None) -> str:
+    import re
+    table = {**SAY_AS, **(extra or {})}
+    for name in sorted(table, key=len, reverse=True):      # longest first: "KAI CENAT" before "CENAT"
+        say = table[name].strip()
+        if not name.strip() or not say:
+            continue
+        pat = r"(?<![\w])" + r"\s+".join(map(re.escape, name.split())) + r"(?=('s|'S|’s|’S)?(?![\w]))"
+        text = re.sub(pat, say, text, flags=re.I)
+    return text
+
+
+def user_pronunciations() -> dict:
+    from .config import settings
+    p = settings().get("pronounce") or {}
+    return p if isinstance(p, dict) else {}
+
+
 def speakable(text: str) -> str:
-    """ALL-CAPS hooks make voices spell words out ("KAI" -> K-A-I). Convert to normal case, keep real acronyms."""
+    """ALL-CAPS hooks make voices spell words out ("KAI" -> K-A-I). Convert to normal case, keep real acronyms.
+    Then names are swapped for how they're said (ISHOWSPEED -> I Show Speed)."""
+    return say_names(_uncap(text), user_pronunciations())
+
+
+def _uncap(text: str) -> str:
     import re
     letters = [c for c in text if c.isalpha()]
     if not letters or sum(c.isupper() for c in letters) / len(letters) < 0.7:
