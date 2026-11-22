@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reelmaker</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <a href="#" id="homeLink" class="brand">🎬 Reelmaker</a>
+  <div class="dayPick">
+    <select id="daySel" title="Day folder"></select>
+    <button id="newDayBtn" class="ghost small">+ New day</button>
+    <button id="restartBtn" class="ghost small" title="Restart Reelmaker — loads updates. Your edits are saved first.">⟳ Restart</button>
+  </div>
+  <div id="usageBar" class="usageBar hidden">
+    <a id="ubTask" class="ubTask" href="#"><span id="ubLabel"></span><span class="bar small"><i id="ubTaskBar"></i></span><span id="ubPct" class="ubNum"></span></a>
+    <span class="ubMeter" title="CPU usage (whole Mac)">CPU <span class="bar small"><i id="ubCpuBar"></i></span><span id="ubCpu" class="ubNum"></span></span>
+    <span class="ubMeter" title="GPU usage (Apple GPU)">GPU <span class="bar small"><i id="ubGpuBar"></i></span><span id="ubGpu" class="ubNum"></span></span>
+    <span class="ubMeter" title="Memory in use">RAM <span id="ubMem" class="ubNum"></span></span>
+    <span id="ubNetWrap" class="ubMeter hidden" title="Download speed">↓ <span id="ubNet" class="ubNum"></span></span>
+    <span id="ubMore" class="hint"></span>
+  </div>
+</header>
+
+<main id="home" class="view">
+  <section class="card narrow">
+    <h2>Make reels</h2>
+
+    <label class="lbl">1. Video</label>
+    <div class="seg2">
+      <label><input type="radio" name="srcType" value="youtube" checked><span>YouTube link</span></label>
+      <label><input type="radio" name="srcType" value="file"><span>File on my Mac</span></label>
+    </div>
+    <div id="ytRow" class="row"><input id="urlIn" placeholder="https://www.youtube.com/watch?v=…" class="grow"></div>
+    <div id="fileRow" class="row hidden"><input id="pathIn" placeholder="Choose a video file" class="grow"><button id="pickBtn">Choose…</button></div>
+
+    <label class="lbl">2. Clips</label>
+    <div class="seg2">
+      <label><input type="radio" name="clipMode" value="auto" checked><span>✨ Auto-find best clips</span></label>
+      <label><input type="radio" name="clipMode" value="mine"><span>⏱ My timestamps / moments</span></label>
+    </div>
+    <div id="autoRow">
+      <div class="row gap">
+        <label>How many reels?<input id="countIn" type="number" min="1" max="10" value="3" class="num"></label>
+        <label>Search only between <input id="winA" placeholder="5:00:00" class="short"> and <input id="winB" placeholder="5:30:00" class="short"></label>
+      </div>
+      <p class="hint">Optional window — for long streams it's much faster than scanning the whole video.</p>
+    </div>
+    <div id="mineRow" class="hidden">
+    <label class="lbl hint">One reel per line · timestamps, a description, or both</label>
+    <textarea id="scenIn" rows="4" placeholder="10:28-11:35 Speed jumps out of his chair when Vice City unlocks&#10;Speed flirts in front of Lucia&#10;25:42-26:08 + 31:05-31:12 (two ranges joined into one reel)"></textarea>
+    <div id="momentPreview" class="mlist"></div>
+    </div>
+
+    <div class="row gap">
+      <label>Creator <input id="creatorIn" placeholder="Speed" class="short"></label>
+      <label title="Each reel's final MP4 is exported automatically as soon as it's ready — no clicking through reels. You can still edit and export again."><input type="checkbox" id="autoExport" checked> Export final MP4s automatically</label>
+      <label>Length <select id="targetSel"><option value="0" selected>✨ Auto (best length)</option><option value="20">~20s</option><option value="30">~30s</option><option value="45">~45s</option><option value="60">~60s</option></select></label>
+    </div>
+
+    <div id="planSummary" class="summary"></div>
+    <button id="createBtn" class="primary big">Make my reels</button>
+  </section>
+
+  <section class="card narrow">
+    <div class="row"><h2 class="grow" style="margin:0">🧹 Remove metadata from any video</h2><button id="cleanBtn">Choose a video…</button></div>
+    <p class="hint">Makes a cleaned copy (“name-clean.mp4”) next to the original and checks it with exiftool. Your reel exports are cleaned automatically.</p>
+    <div id="cleanResult"></div>
+  </section>
+
+  <section class="card narrow">
+    <div class="reelsHead">
+      <h2>Reels in <span id="dayName"></span></h2>
+      <div class="row">
+        <button id="rehookBtn" class="ghost small hidden" title="Write new hooks for every reel in this day. Reels where you typed your own hook keep it.">✨ Rewrite hooks</button>
+        <button id="retryAllBtn" class="ghost small hidden"></button>
+        <button id="exportAllBtn" class="small hidden"></button>
+      </div>
+    </div>
+    <div id="reelList" class="reelList"></div>
+  </section>
+</main>
+
+<main id="editor" class="view hidden">
+  <div class="reelNav">
+    <button id="prevReel" class="ghost small">← Previous</button>
+    <select id="reelPick" title="Jump to any reel in this day folder"></select>
+    <button id="nextReel" class="ghost small">Next reel →</button>
+    <span id="reelPos" class="hint"></span>
+    <button id="nextTodo" class="small hidden"></button>
+  </div>
+  <div class="edHead">
+    <input id="reelName" class="titleIn">
+    <div class="row"><span id="durBadge" class="badge"></span><span id="saveState" class="hint"></span><button id="openFolder" class="ghost small">Open folder</button><button id="delReel" class="ghost small danger">Delete reel</button></div>
+  </div>
+  <div id="statusBox" class="card status"></div>
+
+  <div id="edBody" class="edGrid hidden">
+    <!-- left: the reel itself -->
+    <div class="phoneCol">
+      <div id="phoneWrap" class="phoneWrap">
+        <video id="draftV" class="phone" controls playsinline></video>
+        <div class="capLayer">
+          <div id="liveHook" class="liveHook hidden"></div>
+          <div id="liveCap" class="liveCap hidden" title="Drag up or down to move the captions"></div>
+          <div id="capGuide" class="capGuide" title="Drag up or down to move the captions"><span id="capGuideTxt">⇕ drag to move captions</span></div>
+        </div>
+      </div>
+      <div id="staleNote" class="stale hidden">You changed something — click Update preview to see and hear it in the reel.</div>
+      <div class="row center"><button id="draftBtn" class="primary">↻ Update preview</button></div>
+      <div id="draftProg" class="hint center"></div>
+      <div id="draftBar" class="bar hidden"><i></i></div>
+      <div class="row center"><button id="finalBtn">Export final MP4</button></div>
+      <div id="finalProg" class="hint center"></div>
+      <div id="finalBar" class="bar hidden"><i></i></div>
+      <div id="finalBox"></div>
+      <div id="draftList" class="hint center"></div>
+    </div>
+
+    <!-- right: what you can change -->
+    <div class="tabCol">
+      <nav class="tabs">
+        <button data-tab="cut" class="on">Story</button>
+        <button data-tab="crops">Layout</button>
+        <button data-tab="hook">Hook</button>
+        <button data-tab="caps">Captions</button>
+      </nav>
+
+      <div id="srcCol" class="card">
+        <div class="row"><select id="pieceSel"></select><span id="srcTime" class="mono"></span>
+          <button id="playBtn" class="ghost small">▶ / ❚❚</button><button id="playCut" class="ghost small">▶ Play the cut</button></div>
+        <div class="vwrap" id="vwrap">
+          <video id="srcV" playsinline preload="auto" crossorigin="anonymous"></video>
+          <div id="boxFace" class="cropBox face hidden"><span>WEBCAM</span><i></i></div>
+          <div id="boxGame" class="cropBox game hidden"><span>GAMEPLAY</span><i></i></div>
+        </div>
+        <div id="timeline" class="timeline"></div>
+      </div>
+
+      <section data-pane="cut" class="card pane">
+        <div id="storyNote" class="note"></div>
+        <h3>Parts in the reel <span class="hint">untick to drop a part</span></h3>
+        <div id="segList"></div>
+        <details class="more">
+          <summary>More cut tools</summary>
+          <div class="row"><button id="splitBtn" class="ghost small">✂ Split at playhead</button><button id="resetCut" class="ghost small">Use my full range</button></div>
+          <h3>Cold open <span class="hint">flash the payoff first</span></h3>
+          <div id="coldBox"></div>
+          <h3>Suggestions</h3>
+          <div id="suggList"></div>
+        </details>
+      </section>
+
+      <section data-pane="crops" class="card pane hidden">
+        <div class="row"><select id="layoutSel"><option value="split">Webcam top · gameplay bottom (zoomed in)</option><option value="splitfit">Webcam top · whole game screen (menus, wide shots)</option><option value="gameonly">Gameplay only</option></select>
+          <button id="applyAll" class="small" title="Copy this layout to every reel in this day folder made from the same video">Use this layout for all reels from this video</button></div>
+        <div id="noCam" class="note hidden">No webcam was found automatically. <button id="markCam" class="small">Mark the webcam myself</button></div>
+        <p class="hint">Drag the boxes on the video above to move them; drag a corner to resize. The blue box is what goes in the top half.</p>
+        <canvas id="pv" width="270" height="480"></canvas>
+        <div class="row"><input id="presetName" placeholder="Name this layout, e.g. Speed stream" class="grow"><button id="savePreset" class="small">Save layout</button></div>
+        <label class="hint chk" id="chanLbl"><input type="checkbox" id="chanDefault" checked> Use it automatically next time</label>
+        <details class="more">
+          <summary>Saved layouts &amp; webcam moves</summary>
+          <div class="row"><select id="presetSel"></select><button id="applyPreset" class="ghost small">Apply</button><button id="delPreset" class="ghost small">Delete</button></div>
+          <h3>If the webcam moves mid-clip</h3>
+          <div id="kfList"></div>
+          <div id="faceHints"></div>
+          <button id="addKf" class="ghost small">+ New layout from playhead onward</button>
+        </details>
+      </section>
+
+      <section data-pane="hook" class="card pane hidden">
+        <label class="chk"><input type="checkbox" id="hookOn"> Opening hook</label>
+        <label class="lbl">Your idea or rough hook <span class="hint">optional — context, a joke, or a line to polish</span></label>
+        <textarea id="hookIdea" rows="2" placeholder="e.g. he waited 3 days for this · Speed loses it when Vice City finally opens"></textarea>
+        <div class="row"><button id="ideaBtn" class="primary">✨ Write hooks</button><span id="hookConf" class="badge"></span></div>
+        <div class="hookWriter">
+          <div class="row"><label>Hook writer <select id="hwMode">
+            <option value="local">Local AI on your Mac — free, private</option>
+            <option value="groq">Groq online AI — free, faster, better hooks</option></select></label>
+            <span id="hwStatus" class="hint"></span></div>
+          <div id="hwGroq" class="hidden">
+            <div id="hwKeyRow" class="row"><input id="hwKey" type="password" autocomplete="off" spellcheck="false" placeholder="Paste your free Groq API key (gsk_…)" class="grow">
+              <button id="hwSave" class="small">Save key</button>
+              <a href="https://console.groq.com/keys" target="_blank" rel="noopener" class="hint">Get a free key →</a></div>
+            <div id="hwHasKey" class="row hidden"><span class="hint">✓ Key saved in your Mac's Keychain</span>
+              <label class="hint">Model <select id="hwModel"></select></label>
+              <button id="hwRemove" class="ghost small">Remove key</button></div>
+            <div class="hint">Groq (groq.com, not “Grok”) is free — no card. It gets this clip's description and transcript.
+              If it's offline or over its free limit, the local AI writes the hooks instead.</div>
+          </div>
+        </div>
+        <div id="hookOpts"></div>
+        <label class="lbl">✏️ Hook in your reel <span class="hint">click a suggestion above to copy it here, then edit freely</span></label>
+        <textarea id="hookScreen" class="hookEdit" rows="2" maxlength="90" placeholder="Type your hook here"></textarea>
+        <div class="row">
+          <select id="voiceSel"></select>
+          <button id="ttsBtn">🔊 Hear it</button>
+          <button id="voiceFileBtn" class="ghost small">Use my own voiceover…</button>
+        </div>
+        <div id="cbRow" class="hidden">
+          <div class="row"><span class="hint" id="refLbl"></span><button id="refBtn" class="ghost small">Match a voice sample…</button><button id="refClear" class="ghost small hidden">Default voice</button></div>
+          <label class="lbl">Energy <span id="energyVal"></span></label><input type="range" id="energyIn" min="0.3" max="1.2" step="0.05">
+        </div>
+        <div id="voiceFileRow" class="hint hidden"></div>
+        <audio id="ttsAudio" class="hidden" controls></audio>
+        <div class="voiceDefault">
+          <div class="row"><b>Default voice tone</b><span id="vdMatch" class="badge hidden">✓ this reel uses it</span></div>
+          <div id="vdDesc" class="hint"></div>
+          <div class="row">
+            <button id="vdSave" class="small">Save this voice as my default</button>
+            <button id="vdUse" class="ghost small">Use my default here</button>
+            <button id="vdAll" class="ghost small">Use this voice for all reels in this day</button>
+            <button id="vdReset" class="ghost small hidden">Reset to built-in</button>
+          </div>
+          <div class="hint">New reels start with your default: voice, energy, speed, voice sample and game sound level.</div>
+        </div>
+        <details class="more">
+          <summary>Voice settings</summary>
+          <label class="hint chk"><input type="checkbox" id="hookLinked"> Voice says the same as the text</label>
+          <input id="hookVoiceText" maxlength="160">
+          <label class="lbl">Speed <span id="speedVal"></span></label><input type="range" id="speedIn" min="0.85" max="1.3" step="0.05">
+          <label class="lbl">Game sound under the voice <span id="duckVal"></span></label><input type="range" id="duckIn" min="-24" max="0" step="1">
+        </details>
+      </section>
+
+      <section data-pane="caps" class="card pane hidden">
+        <label class="lbl">Highlight colour</label>
+        <div id="hlSwatches" class="swatches"></div>
+        <label class="lbl">Hook second-line colour</label>
+        <div id="hkSwatches" class="swatches"></div>
+        <div class="row">
+          <label>Size <input type="range" id="capSize" min="56" max="104" step="2"></label>
+          <label class="chk"><input type="checkbox" id="capCaps"> CAPS</label>
+        </div>
+        <details class="more">
+          <summary>Fix caption words &amp; position</summary>
+          <div class="row"><label>Height <input type="range" id="capY" min="200" max="1800" step="10"></label><button id="capYAuto" class="ghost small">Auto</button></div>
+          <p class="hint">Edit text to fix mistakes. Click a word to always highlight it.</p>
+          <div id="capList" class="capList"></div>
+          <button id="rebuildCaps" class="ghost small">Rebuild from transcript</button>
+        </details>
+      </section>
+    </div>
+  </div>
+</main>
+<div id="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+# Python environments (rebuilt by ./setup or Setup.bat)
+.venv/
+.venv-tts/
+__pycache__/
+*.pyc
+
+# AI models (downloaded by setup — far too big for GitHub)
+models/
+
+# local leftovers
+app.backup-*/
+*.part
+*.partial.mp4
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# never commit secrets (API keys live in the macOS Keychain / Windows Credential Manager, not in files)
+.env
+*.key

@@ -1,0 +1,6 @@
+# Optional: the expressive "Hype narrator" voice (Chatterbox). Lives in its own environment (.venv-tts)
+# because it needs older numpy/torch than the main app. Installed by ./setup when you say yes to the voice.
+chatterbox-tts==0.1.7
+torch==2.6.0
+torchaudio==2.6.0
+numpy==1.26.4

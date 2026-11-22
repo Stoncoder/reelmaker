@@ -1,0 +1,12 @@
+# Windows scripts need CRLF line endings, macOS scripts need LF — whatever computer clones the repo
+*.bat  text eol=crlf
+*.ps1  text eol=crlf
+setup      text eol=lf
+reelmaker  text eol=lf
+*.command  text eol=lf
+*.py   text eol=lf
+*.js   text eol=lf
+*.css  text eol=lf
+*.html text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf

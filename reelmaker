@@ -1,0 +1,59 @@
+#!/bin/zsh
+# Start Reelmaker: ./reelmaker  — or double-click "Start Reelmaker" on your Desktop. It opens in your browser.
+# Already running? It just opens it (and restarts it first if it's running an older version).
+# The ⟳ Restart button in Reelmaker restarts it right here. Ctrl+C (or closing this window) stops everything it started.
+cd "$(dirname "$0")"
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+if [[ ! -x .venv/bin/python ]]; then
+  echo "Reelmaker isn't set up on this Mac yet. Run ./setup first (see README.md)."; exit 1
+fi
+PORT=${REELMAKER_PORT:-8765}
+URL="http://127.0.0.1:$PORT"
+
+if curl -s -m 1 "$URL/api/state" >/dev/null; then
+  ver=$(curl -s -m 2 "$URL/api/ui-version")
+  if [[ "$ver" != *'"api"'* || "$ver" == *'"restart_needed":true'* ]]; then
+    echo "Reelmaker is running an older version — restarting it…"
+    if curl -s -m 5 -X POST -H 'Content-Type: application/json' -d '{"force":false}' "$URL/api/restart" | grep -q restarting; then
+      for i in {1..40}; do sleep 0.5; curl -s -m 1 "$URL/api/ui-version" | grep -q '"restart_needed":false' && break; done
+      echo "Restarted."; open "$URL"; exit 0
+    fi
+    echo "It couldn't restart by itself (it's busy, or it was started another way)."
+    echo "Go to the Terminal window where it runs, press Ctrl+C, then double-click “Start Reelmaker” again."
+  else
+    echo "Reelmaker is already running."
+  fi
+  open "$URL"; exit 0
+fi
+
+OLLAMA_PID=""
+if ! curl -s -m 1 http://127.0.0.1:11434/api/tags >/dev/null; then
+  echo "Starting Ollama (local hook AI)…"
+  OLLAMA_BIN=$(command -v ollama || echo /opt/homebrew/bin/ollama)
+  OLLAMA_FLASH_ATTENTION=1 OLLAMA_KEEP_ALIVE=30s "$OLLAMA_BIN" serve >/dev/null 2>&1 &
+  OLLAMA_PID=$!
+fi
+SERVER_PID=""
+cleanup() {
+  trap - EXIT INT TERM HUP
+  [[ -n "$SERVER_PID" ]] && kill "$SERVER_PID" 2>/dev/null && wait "$SERVER_PID" 2>/dev/null
+  [[ -n "$OLLAMA_PID" ]] && kill "$OLLAMA_PID" 2>/dev/null
+  echo "Reelmaker stopped — nothing left running."
+}
+trap cleanup EXIT INT TERM HUP
+
+export REELMAKER_LAUNCHER=1   # lets the ⟳ Restart button work: exit code 75 means "start me again"
+first=1
+while true; do
+  if (( first )); then
+    ( sleep 2; open "$URL" ) &
+    echo "Reelmaker running at $URL  (press Ctrl+C to stop)"
+  fi
+  .venv/bin/python -m uvicorn app.server:app --host 127.0.0.1 --port "$PORT" &
+  SERVER_PID=$!
+  wait "$SERVER_PID"; code=$?
+  SERVER_PID=""
+  (( code == 75 )) || break
+  echo "↻ Restarting Reelmaker (new version loading)…"
+  first=0
+done

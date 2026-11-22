@@ -1,0 +1,19 @@
+# Reelmaker — main app. Python 3.12. Installed by ./setup (macOS) or setup.ps1 (Windows).
+fastapi==0.165.0
+uvicorn[standard]==0.54.0
+huggingface_hub==2.4.0
+opencv-python-headless==4.14.0.94
+numpy==2.5.5
+kokoro-onnx==0.6.1
+soundfile==0.14.0
+requests==2.34.2
+psutil==7.2.2
+keyring==25.7.0
+yt-dlp>=2026.10.26
+
+# speech to text: MLX on Apple-silicon Macs (uses the Apple GPU), faster-whisper everywhere else (NVIDIA GPU or CPU)
+mlx-whisper==0.4.3 ; sys_platform == "darwin" and platform_machine == "arm64"
+faster-whisper==1.2.1 ; sys_platform != "darwin" or platform_machine != "arm64"
+
+# moving deleted reels to the Recycle Bin (macOS uses the Finder for this)
+send2trash==2.2.0 ; sys_platform != "darwin"

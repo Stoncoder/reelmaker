@@ -1,0 +1,157 @@
+#!/bin/zsh
+# Reelmaker setup for macOS — run once on a Mac with Apple silicon (M1 or newer):   ./setup
+# (Windows PCs: double-click Setup.bat instead.)
+# Installs the tools, the Python environment and the AI models Reelmaker needs. Safe to run again: it skips
+# whatever is already done. Options:  --yes (accept the defaults)  --no-voice  --voice  --no-shortcut
+set -e
+cd "$(dirname "$0")"
+HERE="$PWD"
+
+YES=0; VOICE=ask; SHORTCUT=ask
+for a in "$@"; do
+  case "$a" in
+    --yes|-y) YES=1 ;;
+    --voice) VOICE=yes ;;
+    --no-voice) VOICE=no ;;
+    --no-shortcut) SHORTCUT=no ;;
+    *) echo "Unknown option: $a"; exit 2 ;;
+  esac
+done
+
+step() { print -P "\n%B==> $1%b"; }
+ok()   { print -P "    %F{green}✓%f $1"; }
+warn() { print -P "    %F{yellow}!%f $1"; }
+ask()  {  # ask "question" default(y/n) -> returns 0 for yes
+  local q="$1" d="$2" r
+  if (( YES )); then [[ "$d" == y ]]; return; fi
+  read "r?    $q [$( [[ $d == y ]] && echo Y/n || echo y/N )] "
+  r=${r:-$d}; [[ "$r" == [yY]* ]]
+}
+
+# ---------------------------------------------------------------- this Mac
+step "Checking this Mac"
+if [[ "$(uname -s)" != Darwin || "$(uname -m)" != arm64 ]]; then
+  echo "    Reelmaker needs a Mac with Apple silicon (M1 or newer): transcription runs on the Apple GPU (MLX)."; exit 1
+fi
+RAM_GB=$(( $(sysctl -n hw.memsize) / 1073741824 ))
+FREE_GB=$(df -g "$HERE" | awk 'NR==2{print $4}')
+ok "Apple silicon · ${RAM_GB} GB memory · ${FREE_GB} GB free disk"
+if (( FREE_GB < 12 )); then warn "Setup downloads about 8 GB (11 GB with the expressive voice). Free up space if it fails."; fi
+
+# ---------------------------------------------------------------- Homebrew + tools
+step "Homebrew and tools"
+if ! command -v brew >/dev/null && [[ -x /opt/homebrew/bin/brew ]]; then eval "$(/opt/homebrew/bin/brew shellenv)"; fi
+if ! command -v brew >/dev/null; then
+  echo "    Homebrew (the standard Mac package manager, brew.sh) isn't installed."
+  if ask "Install Homebrew now? It asks for your Mac password." y; then
+    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    eval "$(/opt/homebrew/bin/brew shellenv)"
+  else
+    echo "    Install it from https://brew.sh, then run ./setup again."; exit 1
+  fi
+fi
+ok "Homebrew $(brew --version | head -1 | awk '{print $2}')"
+# ffmpeg-full: has libass (burns in captions) · deno: lets yt-dlp read YouTube · ollama: local hook AI ·
+# exiftool: strips metadata from exports · python@3.12: the app  (yt-dlp itself is installed in .venv below)
+NEED=()
+for f in python@3.12 ffmpeg-full deno ollama exiftool; do
+  brew list --formula "$f" >/dev/null 2>&1 || NEED+=("$f")
+done
+if (( ${#NEED} )); then
+  echo "    Installing: ${NEED[*]}  (a few minutes)"
+  brew install "${NEED[@]}"
+fi
+ok "python@3.12 · ffmpeg-full · deno · ollama · exiftool"
+PY="$(brew --prefix python@3.12)/bin/python3.12"
+
+# ---------------------------------------------------------------- Python environment
+step "Python environment (.venv)"
+if [[ ! -x .venv/bin/python ]]; then "$PY" -m venv .venv; fi
+.venv/bin/python -m pip install --quiet --upgrade pip
+.venv/bin/python -m pip install --quiet -r requirements.txt
+.venv/bin/python -m pip install --quiet --upgrade yt-dlp   # YouTube changes often; an old yt-dlp is the usual cause of failed downloads
+.venv/bin/python -c "import fastapi, mlx_whisper, cv2, kokoro_onnx, soundfile, psutil, keyring" && ok "Packages installed"
+
+# ---------------------------------------------------------------- models
+step "AI models (models/)"
+mkdir -p models
+fetch() {  # fetch URL FILE SHA256
+  local url="$1" out="models/$2" sum="$3"
+  if [[ -f "$out" ]] && [[ "$(shasum -a 256 "$out" | awk '{print $1}')" == "$sum" ]]; then ok "$2 (already here)"; return; fi
+  echo "    Downloading $2…"
+  curl -L --fail --retry 3 -C - --progress-bar -o "$out.part" "$url"
+  if [[ "$(shasum -a 256 "$out.part" | awk '{print $1}')" != "$sum" ]]; then
+    rm -f "$out.part"; echo "    $2 didn't download correctly (checksum mismatch). Run ./setup again."; exit 1
+  fi
+  mv "$out.part" "$out"; ok "$2"
+}
+KOKORO=https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0
+fetch "$KOKORO/kokoro-v1.0.onnx" kokoro-v1.0.onnx 7d5df8ecf7d4b1878015a32686053fd0eebe2bc377234608764cc0ef3636a6c5
+fetch "$KOKORO/voices-v1.0.bin"  voices-v1.0.bin  bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d
+if [[ -f models/whisper-large-v3-turbo/weights.safetensors && -f models/whisper-large-v3-turbo/config.json ]]; then
+  ok "Whisper large-v3-turbo (already here)"
+else
+  echo "    Downloading Whisper large-v3-turbo (speech to text, 1.6 GB)…"
+  HF_HUB_DISABLE_XET=1 .venv/bin/python - <<'PY'
+from huggingface_hub import snapshot_download
+snapshot_download("mlx-community/whisper-large-v3-turbo", local_dir="models/whisper-large-v3-turbo",
+                  allow_patterns=["config.json", "weights.safetensors"])
+PY
+  ok "Whisper large-v3-turbo"
+fi
+
+# ---------------------------------------------------------------- local hook AI (Ollama)
+step "Local hook AI (Ollama)"
+STARTED_OLLAMA=""
+if ! curl -s -m 2 http://127.0.0.1:11434/api/tags >/dev/null; then
+  ollama serve >/dev/null 2>&1 & STARTED_OLLAMA=$!
+  for i in {1..30}; do curl -s -m 1 http://127.0.0.1:11434/api/tags >/dev/null && break; sleep 0.5; done
+fi
+if ollama list 2>/dev/null | grep -q '^qwen2.5:7b'; then
+  ok "qwen2.5:7b (already here)"
+else
+  echo "    Downloading qwen2.5:7b (writes hooks and picks the story, 4.7 GB)…"
+  ollama pull qwen2.5:7b && ok "qwen2.5:7b"
+fi
+if (( RAM_GB >= 24 )) && ! ollama list 2>/dev/null | grep -q '^qwen2.5:14b'; then
+  echo "    Tip: with ${RAM_GB} GB memory you can use the bigger, better model:  ollama pull qwen2.5:14b"
+fi
+[[ -n "$STARTED_OLLAMA" ]] && kill "$STARTED_OLLAMA" 2>/dev/null || true
+
+# ---------------------------------------------------------------- optional expressive voice
+step "Expressive voice (optional)"
+if [[ -x .venv-tts/bin/python ]] && .venv-tts/bin/python -c "import chatterbox" 2>/dev/null; then
+  ok "Hype narrator voice (already installed)"
+else
+  if [[ "$VOICE" == ask ]]; then
+    echo "    The 'Hype narrator' voice sounds the most natural for hooks. Without it, Reelmaker uses its 8 built-in voices."
+    ask "Install it? (about 3 GB more)" y && VOICE=yes || VOICE=no
+  fi
+  if [[ "$VOICE" == yes ]]; then
+    [[ -x .venv-tts/bin/python ]] || "$PY" -m venv .venv-tts
+    .venv-tts/bin/python -m pip install --quiet --upgrade pip
+    .venv-tts/bin/python -m pip install --quiet -r requirements-voice.txt
+    echo "    Downloading the voice model (first time only)…"
+    HF_HUB_DISABLE_XET=1 PYTORCH_ENABLE_MPS_FALLBACK=1 .venv-tts/bin/python -c "
+import torch
+from huggingface_hub import snapshot_download
+snapshot_download('ResembleAI/chatterbox', allow_patterns=['ve.safetensors', 't3_cfg.safetensors', 's3gen.safetensors', 'tokenizer.json', 'conds.pt'])
+" && ok "Hype narrator voice"
+  else
+    ok "Skipped (run ./setup --voice any time to add it)"
+  fi
+fi
+
+# ---------------------------------------------------------------- Desktop shortcut
+step "Desktop shortcut"
+SC="$HOME/Desktop/Start Reelmaker.command"
+if [[ "$SHORTCUT" != no ]] && { [[ "$SHORTCUT" == yes ]] || ask "Put a 'Start Reelmaker' shortcut on your Desktop?" y; }; then
+  printf '#!/bin/zsh\n# Double-click to start Reelmaker (or open it, if it is already running). Keep the window open while you use it.\nexec "%s/reelmaker"\n' "$HERE" > "$SC"
+  chmod +x "$SC"; ok "Desktop › Start Reelmaker"
+else
+  ok "Skipped"
+fi
+chmod +x reelmaker Reelmaker.command 2>/dev/null || true
+
+print -P "\n%B%F{green}Reelmaker is ready.%f%b Start it by double-clicking 'Start Reelmaker' on your Desktop, or:  ./reelmaker"
+print "It opens at http://127.0.0.1:8765 in your browser. Reels are saved in ~/Movies/Reels."
