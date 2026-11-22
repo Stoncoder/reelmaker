@@ -267,6 +267,11 @@ def youtube_meta(url: str) -> dict:
     }
 
 
+# YouTube's HLS streams can be seeked into by ffmpeg; its plain https links now refuse (403) any program but yt-dlp.
+FORMAT_HLS = ("bv*[protocol^=m3u8][vcodec^=avc1][height<=1080]+ba[protocol^=m3u8]/"
+              "b[protocol^=m3u8][vcodec^=avc1][height<=1080]")
+FULL_DOWNLOAD_MAX = 20 * 60   # never download a whole video longer than this just to cut a clip out of it
+
 FORMAT = ("bv*[vcodec^=avc1][height<=1080]+ba[acodec^=mp4a]/"
           "bv*[height<=1080]+ba/b[height<=1080]/b")
 
@@ -403,11 +408,11 @@ def _stream_rate(f: dict, duration: float) -> float:
     return float(size) / duration if size and duration else 0.0
 
 
-def _direct_fetch(url: str, a: float, b: float, dst: Path) -> None:
+def _direct_fetch(url: str, a: float, b: float, dst: Path, fmt: str = FORMAT) -> None:
     """Seek straight into YouTube's streams and encode just [a, b] in one pass (no full download, no double encode).
     Progress: ffmpeg reports how far into the section it is; times the stream's bitrate that is the data downloaded."""
     m = Meter("Connecting to YouTube…", unit="busy")   # asking YouTube for the stream addresses takes a few seconds
-    r = run([tool("yt-dlp"), "--no-playlist", "-f", FORMAT, "-j", url], timeout=120)
+    r = run([tool("yt-dlp"), "--no-playlist", "-f", fmt, "-j", url], timeout=120)
     out = r if isinstance(r, str) else getattr(r, "stdout", "")
     if isinstance(out, bytes):
         out = out.decode()
@@ -416,8 +421,9 @@ def _direct_fetch(url: str, a: float, b: float, dst: Path) -> None:
     inputs = []
     for f in fmts:
         hdr = "".join(f"{k}: {v}\r\n" for k, v in (f.get("http_headers") or {}).items())
-        inputs += (["-headers", hdr] if hdr else []) + ["-reconnect", "1", "-reconnect_streamed", "1", "-request_size", "10000000",
-                                                         "-ss", f"{a:.3f}", "-i", f["url"]]
+        hls = str(f.get("protocol", "")).startswith("m3u8")
+        inputs += (["-headers", hdr] if hdr else []) + ["-reconnect", "1", "-reconnect_streamed", "1"] + \
+                  ([] if hls else ["-request_size", "10000000"]) + ["-ss", f"{a:.3f}", "-i", f["url"]]
     dur = b - a
     vid_len = float(info.get("duration") or 0)
     rates = [_stream_rate(f, vid_len) for f in fmts]
@@ -528,15 +534,27 @@ def fetch_youtube_piece(url: str, start: float, end: float, dst: Path, log) -> d
         site = "Twitch" if "twitch.tv" in url else "Kick" if "kick.com" in url else "YouTube"
         log(f"Fetching only {fmt_time(a)}–{fmt_time(b)} straight from {site} (one fast pass)…")
         try:
-            _direct_fetch(url, a, b, dst)
-            if video_info(dst)["duration"] < (b - a) * 0.8:
-                raise MediaError("short result")
+            last = None
+            for fmt in ((FORMAT_HLS, FORMAT) if "youtu" in url else (FORMAT,)):
+                try:
+                    _direct_fetch(url, a, b, dst, fmt)
+                    if video_info(dst)["duration"] < (b - a) * 0.8:
+                        raise MediaError("short result")
+                    last = None
+                    break
+                except Cancelled:
+                    raise
+                except Exception as e:
+                    last = e
+                    dst.unlink(missing_ok=True)
+            if last:
+                raise last
         except Cancelled:
             raise
         except Exception as e:
             method = "section"
             log(f"Direct fetch didn't work ({str(e).splitlines()[0][:100]}); trying yt-dlp sections…")
-            ytdlp_download([tool("yt-dlp"), "--no-playlist", "-f", FORMAT, "--merge-output-format", "mp4",
+            ytdlp_download([tool("yt-dlp"), "--no-playlist", "-f", f"{FORMAT_HLS}/{FORMAT}", "--merge-output-format", "mp4",
                             "--download-sections", f"*{a:.2f}-{b:.2f}", "--force-keyframes-at-cuts",
                             "--no-part", "-o", str(raw) + ".%(ext)s", url],
                            "Downloading the section (backup method)", timeout=900,
@@ -546,8 +564,17 @@ def fetch_youtube_piece(url: str, start: float, end: float, dst: Path, log) -> d
             got.unlink()
     except Cancelled:
         raise
-    except Exception as e:  # fall back to full download, trim locally
-        log(f"Section fetch didn't work ({str(e).splitlines()[0][:120]}). Downloading the full video and trimming locally…")
+    except Exception as e:  # fall back to full download, trim locally — only for short videos
+        try:
+            vid_len = float(youtube_meta(url).get("duration") or 0)
+        except Exception:
+            vid_len = 0.0
+        if not vid_len or vid_len > FULL_DOWNLOAD_MAX:
+            raise MediaError("Couldn't fetch just this part from the site right now (it refused the fast methods), and the "
+                             "app won't download the whole " + (f"{vid_len / 3600:.1f}-hour " if vid_len else "") +
+                             "video to cut a clip. Click “Try again” in a minute; if it keeps failing, update the "
+                             "downloader by running Setup again.\n\nDetails: " + str(e).splitlines()[-1][:300])
+        log(f"Section fetch didn't work ({str(e).splitlines()[0][:120]}). It's a short video, so downloading it whole and trimming locally…")
         method = "full"
         full = dst.parent / "full-source"
         for f in dst.parent.glob("full-source.*"):

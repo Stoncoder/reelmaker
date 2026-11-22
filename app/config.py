@@ -125,7 +125,7 @@ def parse_time(t: str) -> float:
     return total
 
 
-def parse_ranges(text: str) -> list[tuple[float, float]]:
+def parse_ranges(text: str, max_len: float = 600) -> list[tuple[float, float]]:
     """Parse lines like '12:10-12:30', '25:42 – 26:08', '1:02:03 to 1:02:30'."""
     out = []
     for raw in re.split(r"[\n,;]+", text):
@@ -138,8 +138,8 @@ def parse_ranges(text: str) -> list[tuple[float, float]]:
         a, b = parse_time(m.group(1)), parse_time(m.group(2))
         if b <= a:
             raise ValueError(f"The range “{line}” ends before it starts.")
-        if b - a > 600:
-            raise ValueError(f"The range “{line}” is longer than 10 minutes.")
+        if b - a > max_len:
+            raise ValueError(f"The range “{line}” is longer than {max_len / 60:.0f} minutes.")
         out.append((a, b))
     if not out:
         raise ValueError("Enter at least one time range.")

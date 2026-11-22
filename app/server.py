@@ -271,7 +271,8 @@ def full_scan(d: Path, src: dict, win: dict | None = None) -> dict:
             elif src["type"] == "youtube":
                 log(d, f"Downloading a small 360p copy of {fmt_time(a)}–{fmt_time(b)} to search in…")
                 # 360p is roughly 60 KB/s of video+audio: lets the bar move even though yt-dlp can't size a section
-                media.ytdlp_download([media.tool("yt-dlp"), "--no-playlist", "-f", "bv*[height<=360]+ba/b[height<=360]/wa*+ba/b",
+                media.ytdlp_download([media.tool("yt-dlp"), "--no-playlist", "-f",
+                                      "bv*[protocol^=m3u8][height<=360]+ba[protocol^=m3u8]/b[protocol^=m3u8][height<=360]/bv*[height<=360]+ba/b[height<=360]/wa*+ba/b",
                                       "--merge-output-format", "mp4", "--download-sections", f"*{a}-{b}", "--force-keyframes-at-cuts",
                                       "--no-part", "-o", str(tmp), src["url"]], "Downloading a 360p search copy",
                                      timeout=7200, expect=(b - a) * 60e3)
@@ -1047,19 +1048,26 @@ def parse_moments(text: str = Body(..., embed=True)):
             if not m:
                 break
             try:
-                (a, b), = parse_ranges(f"{m.group(1)}-{m.group(2)}")
+                (a, b), = parse_ranges(f"{m.group(1)}-{m.group(2)}", max_len=3 * 3600)
                 ranges.append({"start": a, "end": b, "label": f"{fmt_time(a)}–{fmt_time(b)}"})
             except ValueError as e:
                 a, b = (sum(float(x) * 60 ** i for i, x in enumerate(reversed(t.split(":")))) for t in (m.group(1), m.group(2)))
                 hint = ""
-                if b - a > 600 and m.group(2).count(":") == 2:
+                if b - a > 3 * 3600 and m.group(2).count(":") == 2:
                     hint = f" “{m.group(2)}” reads as {fmt_time(b)} (hours:minutes:seconds). Did you mean {m.group(2).rsplit(':', 1)[0]}?"
                 err = str(e) + hint
             rest = rest[m.end():]
         desc = rest.strip(" -–—:,")
         if _re.search(TIME_RE, desc) and not ranges and not err:
             err = "Couldn't read the times. Use a format like 10:28-11:35."
-        out.append({"line": n, "ranges": ranges, "scenario": desc, "error": err})
+        note = None
+        if not err and len(ranges) == 1 and ranges[0]["end"] - ranges[0]["start"] > 600:
+            mins = (ranges[0]["end"] - ranges[0]["start"]) / 60
+            note = (f"{mins:.0f} min range — the app searches it for the best moment"
+                    + (" matching your description" if desc else "") + " and clips only that.")
+        elif not err and sum(r["end"] - r["start"] for r in ranges) > 600:
+            err = "Joined ranges (with +) can be 10 minutes at most in total. Use one long range to let the app search it."
+        out.append({"line": n, "ranges": ranges, "scenario": desc, "error": err, "note": note})
     return out
 
 
@@ -1104,7 +1112,13 @@ def create_reels(day: str, body: dict = Body(...)):
         untimed = [m.get("scenario", "") for m in moments if not m.get("ranges")]
         scenarios = [s for s in untimed if s]
         for m in timed:
-            jobs.append(([{"start": float(r["start"]), "end": float(r["end"])} for r in m["ranges"]], m.get("scenario", ""), None))
+            rr = [{"start": float(r["start"]), "end": float(r["end"])} for r in m["ranges"]]
+            if len(rr) == 1 and rr[0]["end"] - rr[0]["start"] > 600:
+                sc = m.get("scenario", "")
+                jobs.append(([], sc, 0, {"batch": analysis.uid(), "window": rr[0],
+                                         "batch_info": {"scenarios": [sc] if sc else [], "count": 1}}))
+                continue
+            jobs.append((rr, m.get("scenario", ""), None))
         for k, sc in enumerate(untimed):
             jobs.append(([], sc, k))
     elif ranges:
@@ -1121,7 +1135,9 @@ def create_reels(day: str, body: dict = Body(...)):
     existing = [int(x.name.split("-")[1]) for x in dd.glob("reel-*") if x.name.split("-")[1].isdigit()]
     n = max(existing, default=0)
     created = []
-    for rngs, scen, bi in jobs:
+    for job in jobs:
+        rngs, scen, bi = job[:3]
+        own = job[3] if len(job) > 3 else None     # a long range: searched on its own
         n += 1
         label = slug(scen)[:24] if scen else ""
         if rngs and not scen:
@@ -1133,8 +1149,10 @@ def create_reels(day: str, body: dict = Body(...)):
              "ranges": rngs, "scenario": scen, "creator": creator, "target": target, "state": "queued", "log": [],
              "auto_export": auto_export,
              "batch": batch, "batch_index": bi, "window": win if bi is not None else None,
-             "batch_info": {"scenarios": scenarios, "count": sum(1 for j in jobs if j[2] is not None)},
+             "batch_info": {"scenarios": scenarios, "count": sum(1 for j in jobs if j[2] is not None and len(j) == 3)},
              "caption_style": {"size": 80, "caps": True, "hook_size": 70, "highlight": "#FFE600", "hook_color": "#FF5FA2"}}
+        if own:
+            p.update(own)
         save(d, p)
         set_job(d, stage="queued", progress=0)
         PIPE.submit(pipeline, d)

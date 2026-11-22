@@ -203,7 +203,8 @@ async function parseMoments() {
   moments.forEach((m, i) => box.append(h("div", { class: "mrow" + (m.error ? " bad" : "") },
     h("b", {}, `Reel ${i + 1}`),
     m.error ? h("span", { class: "err" }, m.error)
-      : h("span", {}, m.ranges.length ? m.ranges.map((r) => r.label).join(" + ") : "app finds the moment", m.scenario ? h("span", { class: "hint" }, " · " + m.scenario) : null))));
+      : h("span", {}, m.ranges.length ? m.ranges.map((r) => r.label).join(" + ") : "app finds the moment", m.scenario ? h("span", { class: "hint" }, " · " + m.scenario) : null,
+          m.note ? h("div", { class: "hint" }, "🔎 " + m.note) : null))));
   drawPlan();
 }
 const autoMode = () => $("input[name=clipMode]:checked").value === "auto";
@@ -237,6 +238,7 @@ function drawPlan() {
   else if (auto && sw.win) out.push(`Only that ${Math.round((sw.win.end - sw.win.start) / 60)} min is scanned (about 1 min of waiting per 5 min of video).`);
   else if (auto || untimed) out.push("Finding moments scans the whole video: it's transcribed once (about 4 min for 20 min of video)" +
     ($("input[name=srcType]:checked").value === "youtube" ? " from a small 360p copy." : ".") + " Set a search window to make it faster.");
+  else if (ms.some((m) => m.note)) out.push("Short ranges are fetched directly; long ones are searched in a small 360p copy first (about 1 min of waiting per 5 min of range), then only the best part is fetched.");
   else if (ms.length) out.push("Only your ranges are fetched — quick.");
   out.push($("#autoExport").checked ? "Each reel's final MP4 is exported automatically when it's ready — nothing to click."
     : "Automatic export is off: you'll export each reel yourself (or use “Export all” below).");
