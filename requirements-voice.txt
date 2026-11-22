@@ -4,3 +4,6 @@ chatterbox-tts==0.1.7
 torch==2.6.0
 torchaudio==2.6.0
 numpy==1.26.4
+# Chatterbox's watermark library (perth) imports pkg_resources, which setuptools 81+ removed.
+# Without this pin the voice fails to start ("Chatterbox failed to start").
+setuptools<81
