@@ -323,17 +323,22 @@ $("#homeLink").onclick = (e) => { e.preventDefault(); location.hash = ""; };
   };
   const tick = async () => {
     clearTimeout(timer);
-    if (document.visibilityState !== "visible") { timer = setTimeout(tick, 3000); return; }
-    const r = await fetch(`/api/system${busy ? "" : "?lite=1"}`).then((x) => x.json()).catch(() => null);
+    const hidden = document.visibilityState !== "visible";
+    // in another tab: keep following a running job (for the tab icon), but go quiet when nothing runs
+    if (hidden && !busy) return;
+    const r = await fetch(`/api/system${busy && !hidden ? "" : "?lite=1"}`).then((x) => x.json()).catch(() => null);
     const act = (r && r.active) || [];
     busy = act.length > 0;
+    tabIcon(act);
+    if (hidden) { if (busy) timer = setTimeout(tick, 2000); return; }
     bar.classList.toggle("hidden", !busy);
     if (busy) {
       const a = act[0];
-      $("#ubLabel").textContent = `${a.label} · ${a.reel.replace(/^reel-(\d+).*/, "reel $1")}`;
+      const isLive = a.day === "live-search";
+      $("#ubLabel").textContent = `${a.label} · ${isLive ? "live search" : a.reel.replace(/^reel-(\d+).*/, "reel $1")}`;
       $("#ubTaskBar").style.width = `${((a.progress || 0) * 100).toFixed(1)}%`;
       $("#ubPct").textContent = a.waiting ? "" : `${Math.floor((a.progress || 0) * 100)}%`;
-      $("#ubTask").href = `#/${enc(a.day)}/${enc(a.reel)}`;
+      $("#ubTask").href = isLive ? "#/live" : `#/${enc(a.day)}/${enc(a.reel)}`;
       $("#ubTask").title = act.map((x) => `${x.label} — ${x.reel} ${x.waiting ? "(waiting)" : Math.floor((x.progress || 0) * 100) + "%"}`).join("\n");
       $("#ubMore").textContent = act.length > 1 ? `+${act.length - 1} more` : "";
       if (r.cpu === undefined) { $("#ubCpu").textContent = $("#ubGpu").textContent = $("#ubMem").textContent = "…"; }
@@ -352,8 +357,68 @@ $("#homeLink").onclick = (e) => { e.preventDefault(); location.hash = ""; };
   tick();
   // coming back to the tab, or starting a render/export here: check right away instead of waiting up to 3 s
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") tick(); });
-  window.usageKick = () => setTimeout(tick, 300);
+  window.usageKick = () => { busy = true; setTimeout(tick, 300); };   // a job was just started here: follow it even if you switch tabs
 })();
+
+/* ------------------------------------------------------------------ tab icon + title show progress */
+// Working in another tab? The Reelmaker tab's icon becomes a progress ring with the %, and the title says what's
+// running ("42% Exporting · Reelmaker"). When it finishes: a green ✓ until you come back.
+const TAB = { title: document.title, link: null, done: false, spin: 0, had: false };
+function drawIcon(kind, frac) {
+  const c = document.createElement("canvas"); c.width = c.height = 64;
+  const g = c.getContext("2d");
+  g.fillStyle = "#16171d"; g.beginPath(); g.arc(32, 32, 31, 0, 2 * Math.PI); g.fill();
+  if (kind === "idle") {
+    g.fillStyle = "#f5a524"; g.font = "bold 38px -apple-system, system-ui, sans-serif"; g.textAlign = "center"; g.textBaseline = "middle";
+    g.fillText("R", 32, 35);
+  } else if (kind === "done") {
+    g.fillStyle = "#22c55e"; g.beginPath(); g.arc(32, 32, 31, 0, 2 * Math.PI); g.fill();
+    g.strokeStyle = "#fff"; g.lineWidth = 8; g.lineCap = "round"; g.lineJoin = "round";
+    g.beginPath(); g.moveTo(18, 33); g.lineTo(28, 43); g.lineTo(46, 22); g.stroke();
+  } else if (kind === "error") {
+    g.fillStyle = "#ef4444"; g.beginPath(); g.arc(32, 32, 31, 0, 2 * Math.PI); g.fill();
+    g.fillStyle = "#fff"; g.font = "bold 44px -apple-system, system-ui, sans-serif"; g.textAlign = "center"; g.textBaseline = "middle";
+    g.fillText("!", 32, 35);
+  } else {
+    g.strokeStyle = "#3a3d48"; g.lineWidth = 8; g.beginPath(); g.arc(32, 32, 24, 0, 2 * Math.PI); g.stroke();
+    g.strokeStyle = "#f5a524"; g.lineCap = "round"; g.beginPath();
+    if (kind === "wait") {             // waiting / unknown progress: a turning arc
+      const a = (TAB.spin = (TAB.spin + 1) % 8) * Math.PI / 4;
+      g.arc(32, 32, 24, a, a + Math.PI * 0.6);
+    } else {
+      g.arc(32, 32, 24, -Math.PI / 2, -Math.PI / 2 + 2 * Math.PI * Math.max(0.02, frac));
+    }
+    g.stroke();
+    if (kind !== "wait") {
+      g.fillStyle = "#fff"; g.font = "bold 22px -apple-system, system-ui, sans-serif"; g.textAlign = "center"; g.textBaseline = "middle";
+      g.fillText(String(Math.floor(frac * 100)), 32, 34);
+    }
+  }
+  if (!TAB.link) {
+    document.querySelectorAll("link[rel~='icon']").forEach((l) => l.remove());
+    TAB.link = h("link", { rel: "icon", type: "image/png" }); document.head.append(TAB.link);
+  }
+  TAB.link.href = c.toDataURL("image/png");
+}
+function tabIcon(act) {
+  const wasBusy = TAB.had;
+  TAB.had = act.length > 0;
+  if (act.length) {
+    TAB.done = false;
+    const a = act[0], f = a.progress || 0;
+    drawIcon(a.waiting || !f ? "wait" : "busy", f);
+    const more = act.length > 1 ? ` (+${act.length - 1})` : "";
+    document.title = `${a.waiting ? "⏳" : Math.floor(f * 100) + "%"} ${a.label}${more} · ${TAB.title}`;
+  } else if (wasBusy && document.visibilityState !== "visible") {
+    TAB.done = true; drawIcon("done"); document.title = `✓ Done · ${TAB.title}`;   // stays until you look
+  } else if (!TAB.done) {
+    drawIcon("idle"); document.title = TAB.title;
+  }
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && TAB.done) { TAB.done = false; drawIcon("idle"); document.title = TAB.title; }
+});
+drawIcon("idle");
 
 /* ------------------------------------------------------------------ out-of-date tab */
 // An open tab keeps running the page it loaded. If Reelmaker is updated meanwhile, say so (once) and offer a reload.
@@ -1479,7 +1544,7 @@ $("#lfGo").onclick = async () => {
   $("#lfGo").disabled = true; $("#lfMoments").innerHTML = ""; $("#lfApprove").classList.add("hidden");
   try {
     const r = await api("POST", "/api/live/search", { stream: LV.sel, minutes: +$("#lfMinutes").value, count: +$("#lfCount").value, target: +$("#lfTarget").value });
-    LV.search = { id: r.id }; pollSearch();
+    LV.search = { id: r.id }; pollSearch(); window.usageKick && window.usageKick();
   } catch (e) { $("#lfGo").disabled = false; }
 };
 async function pollSearch() {
@@ -1536,7 +1601,7 @@ $("#lfMake").onclick = async () => {
   try {
     const r = await api("POST", `/api/live/search/${LV.search.id}/approve`, { ids, day: S.day, target: +$("#lfTarget").value, auto_export: $("#lfAuto").checked });
     toast(`${r.created.length} reel${r.created.length > 1 ? "s are" : " is"} being made in “${S.day}” — they're clipped in full quality one after another.`, 7000);
-    LV.search.p.approved = [...(LV.search.p.approved || []), ...ids]; drawMoments(LV.search.p);
+    LV.search.p.approved = [...(LV.search.p.approved || []), ...ids]; drawMoments(LV.search.p); window.usageKick && window.usageKick();
   } finally { $("#lfMake").disabled = false; }
 };
 $("#liveEdit").onclick = async () => {
