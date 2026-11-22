@@ -169,21 +169,24 @@ def t_server():
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
     env = {k: v for k, v in os.environ.items() if k != "REELMAKER_LAUNCHER"}
+    # the server's output goes to a file: an unread pipe fills up (quickly on Windows) and freezes the server
+    log = open(TMP / "server.log", "w", encoding="utf-8")
     p = subprocess.Popen([sys.executable, "-m", "uvicorn", "app.server:app", "--host", "127.0.0.1", "--port", str(port)],
-                         cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
-                         encoding="utf-8", errors="replace", creationflags=system.NO_WINDOW)
+                         cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT, creationflags=system.NO_WINDOW)
+    tail = lambda: (TMP / "server.log").read_text(encoding="utf-8", errors="replace")[-600:]
     try:
         url = f"http://127.0.0.1:{port}"
-        for _ in range(60):
+        t0 = time.time()
+        while True:
             try:
-                st = json.loads(urllib.request.urlopen(url + "/api/state", timeout=1).read())
+                st = json.loads(urllib.request.urlopen(url + "/api/state", timeout=5).read())
                 break
             except Exception:
                 if p.poll() is not None:
-                    raise RuntimeError("server exited: " + p.stderr.read()[-400:])
+                    raise RuntimeError("server exited: " + tail())
+                if time.time() - t0 > 120:
+                    raise RuntimeError("server didn't answer within 120 s. Its output: " + tail())
                 time.sleep(0.5)
-        else:
-            raise RuntimeError("server didn't answer")
         ver = json.loads(urllib.request.urlopen(url + "/api/ui-version", timeout=2).read())
         page = urllib.request.urlopen(url + "/", timeout=2).read().decode()
         assert "Reelmaker" in page
@@ -193,13 +196,14 @@ def t_server():
             raise RuntimeError("restart should be refused when not started by the launcher")
         except urllib.error.HTTPError as e:
             assert e.code == 409, e.code
-        return f"api {ver['api']}, page ok, reels root {st['root']}"
+        return f"answered after {time.time() - t0:.1f}s, api {ver['api']}, page ok, reels root {st['root']}"
     finally:
         p.terminate()
         try:
             p.wait(10)
         except Exception:
             p.kill()
+        log.close()
 
 
 if __name__ == "__main__":
