@@ -53,6 +53,19 @@ def chunks(words, bins, score, start, end, size=15.0):
 
 
 def _ask(prompt, ctx=8192, temperature=0.4):
+    """Finding moments and cutting: Groq when it's switched on (runs in the cloud, so the Mac stays cool),
+    else the local AI. Any Groq problem falls back to the local AI."""
+    if online_on():
+        from . import online_ai
+        from .config import settings
+        try:
+            return online_ai.chat_json(prompt, settings().get("groq_model") or online_ai.PREFERRED_MODELS[0], temperature, timeout=120)
+        except Exception:
+            pass
+    return _ask_local(prompt, ctx, temperature)
+
+
+def _ask_local(prompt, ctx=8192, temperature=0.4):
     r = requests.post(f"{OLLAMA_URL}/api/generate", timeout=600, json={
         "model": OLLAMA_MODEL, "prompt": prompt, "format": "json", "stream": False, "keep_alive": "30s",
         "options": {"temperature": temperature, "num_ctx": ctx}})
@@ -134,10 +147,24 @@ Find three moments, all between {start:.0f} and {end:.0f}:
 Return JSON only: {{"setup_start": n, "payoff": n, "reaction_end": n, "story": "setup -> payoff in one sentence", "confidence": "high|medium|low"}}"""
 
 
-def smart_cut(words, profile, motion, peaks, start, end, scenario, creator, target, silences, avoid=None):
+def _natural_end(t, words, hard_end, max_extra=8.0):
+    """Push an ending to the end of what's being said: never stop mid-sentence or mid-reaction.
+    Follows the speech until the first real pause (0.9s), at most max_extra seconds further."""
+    end = t
+    for w in sorted((w for w in words if w["e"] > t - 0.3), key=lambda w: w["s"]):
+        if w["s"] - end > 0.9 or w["e"] > min(hard_end, t + max_extra):
+            break
+        end = max(end, w["e"])
+    return min(hard_end, end + 0.6)
+
+
+def smart_cut(words, profile, motion, peaks, start, end, scenario, creator, target, silences, avoid=None, hard_end=None):
     """Returns dict(segments=[(s,e)], cold_open, payoff, hooks, story, confidence, source).
-    target=0 means auto: keep the moment's natural length (15–60s), only dropping dead air and dull stretches."""
+    target=0 means auto: keep the moment's natural length (15–60s), only dropping dead air and dull stretches.
+    hard_end: the last second of footage there is (the fetched piece goes a bit past the range), so an ending
+    that's still being spoken can run on past the range instead of being chopped."""
     auto = not target
+    hard_end = max(end, hard_end or end)
     if auto:
         target = 30
     bins, score = energy(profile, motion, start, end)
@@ -159,7 +186,13 @@ def smart_cut(words, profile, motion, peaks, start, end, scenario, creator, targ
     if payoff is None:  # biggest reaction in the range
         payoff = float(bins[int(np.argmax(score))]) if len(score) else end - 3
         setup, rend = payoff - target * 0.65, payoff + 5
-    setup, rend = max(start, setup), min(end, max(rend, payoff + 2.5))
+    # THE ENDING: the payoff plus the whole reaction. A short moment's own end is its ending (that's where you or
+    # the finder said it ends), and whatever is still being said then runs on to the next pause.
+    rend = max(rend, payoff + 6)
+    if end - start <= (90 if auto else max(target * 1.5, 30)):
+        rend = max(rend, end)
+    setup = max(start, setup)
+    rend = _natural_end(min(rend, hard_end), words, hard_end)
     if auto:
         if rend - setup < 15:
             setup = max(start, rend - 15)
@@ -176,7 +209,8 @@ def smart_cut(words, profile, motion, peaks, start, end, scenario, creator, targ
         quiet = sum(min(b, pc[1]) - max(a, pc[0]) for a, b in sil if a < pc[1] and b > pc[0])
         return (float(score[sel].mean()) if sel.any() else 0) + 0.25 * talk - 1.5 * quiet
     keep = [True] * len(pieces)
-    protected = {i for i, pc in enumerate(pieces) if pc[1] > payoff - 3 and pc[0] < payoff + 3} | {0}
+    # never trim the opening second, the payoff, or anything after it: the reaction IS the ending
+    protected = {i for i, pc in enumerate(pieces) if pc[1] > payoff - 3} | {0}
     total = rend - setup
     if auto:
         # drop clearly dull pieces (no talk, quiet, low reaction), then cap at 60s
@@ -218,13 +252,16 @@ def smart_cut(words, profile, motion, peaks, start, end, scenario, creator, targ
         return min(c, key=lambda g: abs(g - t)) if c else t
 
     out = [(snap(a, a - 1.2, a + 0.8), snap(b, b - 0.8, b + 1.2)) for a, b in result["segments"]]
+    if out:   # the very last cut only ever moves later (to a pause), never earlier into the last words
+        a, b = result["segments"][-1]
+        out[-1] = (out[-1][0], max(b, snap(b, b, min(hard_end, b + 1.5))))
     merged = []
     for a, b in out:
         if merged and a - merged[-1][1] < 0.4:
             merged[-1] = (merged[-1][0], max(b, merged[-1][1]))
         elif b - a >= 0.8:
             merged.append((a, b))
-    result["segments"] = [(round(a, 2), round(b, 2)) for a, b in merged]
+    result["segments"] = [(round(float(a), 2), round(float(b), 2)) for a, b in merged]
     return result
 
 
@@ -372,7 +409,7 @@ def _hook_ask(prompt, ctx, temperature, writing=False):
                 HOOK_INFO["note"] = str(e)
     if writing:
         HOOK_INFO.update(source="local", model=OLLAMA_MODEL)
-    return _ask(prompt, ctx=ctx, temperature=temperature)
+    return _ask_local(prompt, ctx=ctx, temperature=temperature)
 
 
 def write_hooks(scenario, creator, said, story_note="", idea="", avoid=None):

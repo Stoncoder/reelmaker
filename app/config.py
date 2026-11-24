@@ -153,3 +153,10 @@ def fmt_time(t: float) -> str:
     if h:
         return f"{int(h)}:{int(m):02d}:{s:04.1f}"
     return f"{int(m)}:{s:04.1f}"
+
+
+def first_line(e, last: bool = False) -> str:
+    """An error's first (or last) line, safely: some errors have no message at all (StopIteration, bare
+    exceptions), and showing them must never cause a second error."""
+    lines = [x for x in str(e).splitlines() if x.strip()]
+    return (lines[-1] if last else lines[0]) if lines else (type(e).__name__ if isinstance(e, BaseException) else "unknown error")

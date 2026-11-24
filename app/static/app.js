@@ -27,9 +27,34 @@ function parseT(str) {
   if (!parts.length || parts.some(isNaN)) return null;
   return parts.reduce((a, b) => a * 60 + b, 0);
 }
-function toast(msg, ms = 3500) {
+function toast(msg, ms = 3500, action) {
   const t = $("#toast"); t.textContent = msg; t.classList.add("show");
-  clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove("show"), ms);
+  t.classList.toggle("act", !!action);
+  if (action) t.append(h("button", { class: "small", onclick: () => { t.classList.remove("show"); action.fn(); } }, action.label));
+  clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove("show"), action ? Math.max(ms, 8000) : ms);
+}
+// delete a reel: it goes to Recently deleted, and the toast offers Undo
+async function deleteReel(day, folder, name, after) {
+  if (!confirm(`Delete “${name || folder}”?\n\nYou can bring it back from “Recently deleted” on the home page for 14 days.`)) return false;
+  const r = await api("DELETE", `/api/reel/${enc(day)}/${enc(folder)}`);
+  toast("Reel deleted.", 8000, { label: "Undo", fn: async () => { await restoreDeleted(r.id); } });
+  if (after) after();
+  return true;
+}
+async function restoreDeleted(id) {
+  const r = await api("POST", `/api/deleted/${enc(id)}/restore`);
+  toast(`Restored “${r.folder}”.`);
+  if (!S.folder) { await loadState(); loadReels(); }
+}
+async function loadDeleted() {
+  const r = await api("GET", "/api/deleted").catch(() => null);
+  const box = $("#deletedBox"), list = $("#deletedList");
+  const items = (r && r.deleted) || [];
+  box.classList.toggle("hidden", !items.length);
+  $("#deletedCount").textContent = items.length ? `(${items.length})` : "";
+  list.replaceChildren(...items.map((x) => h("div", { class: "delRow" },
+    h("div", { class: "grow" }, h("b", {}, x.name || x.folder), h("div", { class: "hint" }, `${x.day} · deleted ${new Date(x.time * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}`)),
+    h("button", { class: "small", onclick: () => restoreDeleted(x.id) }, "↩ Restore"))));
 }
 async function api(method, url, body) {
   const r = await fetch(url, { method, headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
@@ -76,9 +101,9 @@ async function loadReels() {
     h("span", {}, `${S.selReels.size} selected`),
     h("button", { class: "small danger", onclick: async () => {
       const n = S.selReels.size;
-      if (!confirm(`Delete ${n} reel${n > 1 ? "s" : ""}? Their folders (drafts, final exports, footage) go to the Trash.`)) return;
+      if (!confirm(`Delete ${n} reel${n > 1 ? "s" : ""}?\n\nYou can bring them back from “Recently deleted” below for 14 days.`)) return;
       for (const f of S.selReels) await api("DELETE", `/api/reel/${enc(S.day)}/${enc(f)}`).catch(() => {});
-      S.selReels.clear(); toast("Moved to the Trash."); loadReels();
+      S.selReels.clear(); toast(`Deleted — restore from “Recently deleted” below if that was a mistake.`, 6000); loadReels();
     } }, "Delete selected"),
     h("button", { class: "small", onclick: async () => {
       const r = await api("POST", `/api/days/${enc(S.day)}/export-all`, { folders: [...S.selReels] }); window.usageKick && window.usageKick();
@@ -106,13 +131,15 @@ async function loadReels() {
         } }),
       h("button", { class: "ghost small del", title: "Delete this reel", onclick: async (e) => {
         e.stopPropagation();
-        if (!confirm(`Delete “${r.name || r.folder}”? Its folder (drafts, final export, footage) goes to the Trash.`)) return;
-        await api("DELETE", `/api/reel/${enc(S.day)}/${enc(r.folder)}`); toast("Moved to the Trash."); loadReels();
+        await deleteReel(S.day, r.folder, r.name, loadReels);
       } }, "🗑"),
+      h("div", { class: "thumb" }, r.thumb
+        ? h("video", { src: `/media/${enc(S.day)}/${enc(r.folder)}/${r.thumb.split("/").map(enc).join("/")}#t=1.5`, preload: "metadata", muted: true, playsinline: true,
+            onmouseenter: (e) => { e.target.muted = true; e.target.play().catch(() => {}); }, onmouseleave: (e) => e.target.pause() })
+        : h("span", { class: "thumbNone" }, st && st !== "error" ? "⏳" : "🎬")),
+      h("div", { class: "cardBody" },
       h("b", {}, r.name || r.folder),
-      h("div", { class: "hint" }, r.folder),
-      h("div", { class: "hint" }, (r.source || "").slice(0, 60)),
-      h("div", {}, ...r.ranges.map((x) => h("span", { class: "tag" }, x))),
+      h("div", { class: "hint" }, `#${(r.folder.match(/^reel-(\d+)/) || [])[1] || ""} · ` + r.ranges.join(" + ")),
       h("div", { style: "margin-top:6px" },
         r.final ? h("span", { class: "tag final" }, "FINAL exported") : null,
         r.drafts ? h("span", { class: "tag" }, `${r.drafts} draft${r.drafts > 1 ? "s" : ""}`) : null,
@@ -120,9 +147,10 @@ async function loadReels() {
         r.rendering ? h("span", { class: "tag" }, (r.render_phase || "").startsWith("Waiting")
           ? (r.rendering === "final" ? "waiting to export" : "waiting to render")
           : `${r.rendering === "final" ? "exporting" : "rendering preview"} ${Math.floor((r.render_progress || 0) * 100)}%`) : null),
-      st && st !== "error" ? h("div", { class: "bar small" }, h("i", { style: `width:${((r.progress || 0) * 100).toFixed(1)}%` })) : null));
+      st && st !== "error" ? h("div", { class: "bar small" }, h("i", { style: `width:${((r.progress || 0) * 100).toFixed(1)}%` })) : null)));
   }
   real.replaceChildren(list);
+  loadDeleted();
   window.scrollTo(0, y);
   const toExport = reels.filter((r) => r.state === "ready" && !r.final && !r.rendering).length;
   const stopped = reels.filter((r) => r.state === "error").length;
@@ -230,19 +258,16 @@ function drawPlan() {
   if (!ms.length) {
     const n = +$("#countIn").value || 1;
     if (!auto) out.push("Type at least one moment, or switch to ✨ Auto-find.");
-    else out.push(`The app will find the ${n} best moment${n > 1 ? "s" : ""} by itself` + (sw.win ? ` between ${$("#winA").value.trim()} and ${$("#winB").value.trim()}.` : "."));
+    else out.push(`Finds the ${n} best moment${n > 1 ? "s" : ""}` + (sw.win ? ` between ${$("#winA").value.trim()} and ${$("#winB").value.trim()}.` : " in the video."));
   } else {
     out.push(`${moments.length} reel${moments.length > 1 ? "s" : ""}: ` + [timed ? `${timed} from your timestamps` : "", untimed ? `${untimed} found from your description` : ""].filter(Boolean).join(", ") + ".");
   }
   if (auto && sw.err) out.push("⚠ " + sw.err);
-  else if (auto && sw.win) out.push(`Only that ${Math.round((sw.win.end - sw.win.start) / 60)} min is scanned (about 1 min of waiting per 5 min of video).`);
-  else if (auto || untimed) out.push("Finding moments scans the whole video: it's transcribed once (about 4 min for 20 min of video)" +
-    ($("input[name=srcType]:checked").value === "youtube" ? " from a small 360p copy." : ".") + " Set a search window to make it faster.");
-  else if (ms.some((m) => m.note)) out.push("Short ranges are fetched directly; long ones are searched in a small 360p copy first (about 1 min of waiting per 5 min of range), then only the best part is fetched.");
-  else if (ms.length) out.push("Only your ranges are fetched — quick.");
-  out.push($("#autoExport").checked ? "Each reel's final MP4 is exported automatically when it's ready — nothing to click."
-    : "Automatic export is off: you'll export each reel yourself (or use “Export all” below).");
-  $("#planSummary").textContent = out.join("\n");
+  else if (auto && sw.win) out.push(`Scans only those ${Math.round((sw.win.end - sw.win.start) / 60)} min — about 1 min of waiting per 5 min.`);
+  else if (auto || untimed) out.push("Tip: set a search window — scanning a whole long stream takes a while.");
+  else if (ms.some((m) => m.note)) out.push("Long ranges are searched first, then only the best part is fetched.");
+  out.push($("#autoExport").checked ? "Final MP4s export by themselves." : "You'll export each reel yourself.");
+  $("#planSummary").textContent = out.join("  ·  ");
   const bad = ms.some((m) => m.error), empty = !auto && !ms.length, werr = auto && sw.err;
   $("#createBtn").disabled = bad || empty || !!werr;
   $("#createBtn").textContent = bad ? "Fix the highlighted line first" : werr ? "Fix the search window first" : "Make my reels";
@@ -282,6 +307,12 @@ $("#createBtn").onclick = async () => {
 /* ------------------------------------------------------------------ routing */
 async function route() {
   const m = location.hash.match(/^#\/([^/]+)\/([^/]+)$/);
+  const from = S.curHash || "";
+  S.curHash = location.hash;
+  if (m && !/^#\/[^/]+\/[^/]+$/.test(from)) S.backTo = from === "#/live" ? "#/live" : "";
+  $("#backLbl").textContent = S.backTo === "#/live" ? "Live" : "My reels";
+  $("#navHome").classList.toggle("on", location.hash !== "#/live");
+  $("#liveBtn").classList.toggle("on", location.hash === "#/live");
   clearTimeout(S.poll);
   await flushSave();   // an edit made just before leaving still lands in the reel it was made in
   if (!S.st) await loadState();
@@ -308,7 +339,47 @@ async function route() {
   }
 }
 window.addEventListener("hashchange", route);
+// sticky things sit just under the header, whatever its height (it grows when the usage bar shows)
+new ResizeObserver(() => document.documentElement.style.setProperty("--hh", $("header").offsetHeight + "px")).observe($("header"));
 $("#homeLink").onclick = (e) => { e.preventDefault(); location.hash = ""; };
+$("#navHome").onclick = (e) => { e.preventDefault(); location.hash = ""; };
+$("#backBtn").onclick = () => { location.hash = S.backTo || ""; };
+// Esc in the editor (not while typing, not in full screen) = back
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || !S.folder || document.fullscreenElement || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName || "")) return;
+  if ($("details.menu").open) { $("details.menu").open = false; return; }
+});
+
+/* ------------------------------------------------------------------ full screen preview */
+// The hook and captions are drawn over the player (so moving them needs no re-render). A plain video full screen
+// would hide them, so full screen shows the whole reel stage instead: video + hook + captions, same as the export.
+(function fullScreen() {
+  const stage = $("#phoneStage"), v = $("#draftV");
+  const isFs = () => !!document.fullscreenElement || stage.classList.contains("fsOn");
+  // real full screen; if the browser refuses it, fill the window instead (same look, Esc leaves)
+  const enter = () => {
+    const req = stage.requestFullscreen || stage.webkitRequestFullscreen;
+    let r = null;
+    try { r = req && req.call(stage); } catch (e) { r = Promise.reject(e); }
+    const fill = () => { stage.classList.add("fsOn"); document.body.classList.add("fsMode"); };
+    if (!req) fill();
+    else if (r && r.catch) r.catch(fill);
+  };
+  const leave = () => { stage.classList.remove("fsOn"); document.body.classList.remove("fsMode"); if (document.fullscreenElement) document.exitFullscreen(); };
+  $("#fsBtn").onclick = enter;
+  $("#fsExit").onclick = leave;
+  v.addEventListener("dblclick", (e) => { e.preventDefault(); isFs() ? leave() : enter(); });
+  // if the browser still puts just the video full screen (some Safari versions), swap to the stage
+  const swap = () => { if (document.fullscreenElement === v) document.exitFullscreen().then(enter).catch(() => {}); };
+  document.addEventListener("fullscreenchange", swap);
+  v.addEventListener("webkitbeginfullscreen", () => { v.webkitExitFullscreen && v.webkitExitFullscreen(); setTimeout(enter, 50); });
+  document.addEventListener("keydown", (e) => {
+    if (!S.folder || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName || "") || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === "f" || e.key === "F") { e.preventDefault(); isFs() ? leave() : enter(); }
+    if (e.key === "Escape" && stage.classList.contains("fsOn")) { e.preventDefault(); leave(); }
+    if (e.key === " " && isFs()) { e.preventDefault(); v.paused ? v.play() : v.pause(); }
+  });
+})();
 
 /* ------------------------------------------------------------------ usage bar (header) */
 // While anything runs (download, transcription, preview, export) the header shows what it is with its progress,
@@ -615,6 +686,7 @@ async function openReel() {
   S.renderSig = p.segments ? renderSig(p) : null;   // the newest preview is taken to match what you open
   S.piece = 0; S.kf = 0;
   $("#reelName").value = S.p.name || S.folder;
+  drawCampBanner();
   drawStatus();
   if (S.p.state === "ready") { $("#edBody").classList.remove("hidden"); buildEditor(); }
   else $("#edBody").classList.add("hidden");
@@ -708,7 +780,8 @@ function drawStatus() {
     box.append(h("div", { class: "hint" }, last ? last.slice(9) : ""));
     box.append(h("button", { class: "ghost small", onclick: async () => { await api("POST", reelUrl("/cancel")); toast("Stopping…"); schedulePoll(500); } }, "Cancel"));
   }
-  if (p.error) box.append(h("div", { class: "err" }, p.error.split("\n")[0]), h("button", { onclick: async () => { await api("POST", reelUrl("/retry")); S.p.state = "queued"; S.p.job = { progress: 0 }; drawStatus(); schedulePoll(500); } }, "Try again"));
+  if (p.state === "error") box.append(h("div", { class: "err" }, (p.error || "It stopped before it finished — usually a network or site hiccup.").split("\n")[0]),
+    h("button", { class: "primary", onclick: async () => { await api("POST", reelUrl("/retry")); S.p.state = "queued"; S.p.job = { progress: 0 }; drawStatus(); schedulePoll(500); } }, "↻ Try again"));
   const log = h("div", { class: "log" }, (p.log || []).join("\n"));
   box.append(h("details", { class: "more", open: wasOpen }, h("summary", {}, "Details"), log));
   if (wasOpen) log.scrollTop = logAtEnd ? log.scrollHeight : logTop;
@@ -748,10 +821,25 @@ function drawDur() {
 }
 $("#reelName").onchange = (e) => { S.p.name = e.target.value; changed(false); };
 $("#delReel").onclick = async () => {
-  if (!confirm("Delete this reel? Its folder (drafts, final export, footage) goes to the Trash.")) return;
-  await api("DELETE", reelUrl()); toast("Moved to the Trash."); location.hash = "";
+  $("details.menu").open = false;
+  await deleteReel(S.day, S.folder, S.p && S.p.name, () => { location.hash = S.backTo || ""; });
 };
-$("#openFolder").onclick = () => api("POST", reelUrl("/reveal"), { file: "" });
+$("#openFolder").onclick = () => { $("details.menu").open = false; api("POST", reelUrl("/reveal"), { file: "" }); };
+document.addEventListener("click", (e) => { const m = $("details.menu"); if (m && m.open && !m.contains(e.target)) m.open = false; });
+
+function drawCampBanner() {
+  const b = $("#campBanner"), c = S.p && S.p.campaign;
+  b.classList.toggle("hidden", !c);
+  if (!c) return;
+  b.replaceChildren(
+    h("span", { class: "cbIcon" }, "💰"),
+    h("div", { class: "grow" },
+      h("b", {}, c.name),
+      h("div", { class: "hint" }, [payText(c), c.platforms && c.platforms.length ? "post on " + c.platforms.map((x) => PLAT_SHORT[x] || x).join(", ") : null,
+        c.min_clip_views ? `${(c.min_clip_views / 1000).toLocaleString()}K views per clip to count` : null].filter(Boolean).join(" · "))),
+    c.rules_url ? h("a", { class: "ghost small linkbtn", href: c.rules_url, target: "_blank", rel: "noopener" }, "Rules ↗") : null,
+    h("a", { class: "small linkbtn primaryLink", href: c.url, target: "_blank", rel: "noopener" }, "Submit on Content Rewards ↗"));
+}
 
 /* ------------------------------------------------------------------ editor: source video */
 const V = $("#srcV");
@@ -820,6 +908,7 @@ function showTab(t) {
   const crops = t === "crops";
   $("#boxGame").classList.toggle("hidden", !crops || S.p.crops.layout === "splitfit");
   $("#boxFace").classList.toggle("hidden", !crops || !isSplit());
+  $("#boxCircle").classList.toggle("hidden", !crops || !circ());
   if (crops) layoutBoxes();
 }
 
@@ -936,6 +1025,9 @@ function layoutBoxes() {
     const b = $(id), c = key === "game" ? fitGame(k.game, k) : k[key];
     Object.assign(b.style, { left: c.x * 100 + "%", top: c.y * 100 + "%", width: c.w * 100 + "%", height: c.h * 100 + "%" });
   }
+  const ci = circ();
+  $("#boxCircle").classList.toggle("hidden", !ci);
+  if (ci) { const c = ci.src; Object.assign($("#boxCircle").style, { left: c.x * 100 + "%", top: c.y * 100 + "%", width: c.w * 100 + "%", height: c.h * 100 + "%" }); }
 }
 function dragBox(id, key) {
   const box = $(id);
@@ -968,11 +1060,105 @@ function dragBox(id, key) {
   });
 }
 dragBox("#boxFace", "face"); dragBox("#boxGame", "game");
+
+/* ---- round facecam: a circle cut from the source (red box) placed anywhere on the reel (render.py face_circle) */
+const circ = () => (S.p && S.p.crops.circle && S.p.crops.circle.on ? S.p.crops.circle : null);
+function circleOnFace(c) {   // the red circle over the webcam box (square in pixels, centred on the face)
+  const W = piece().width, H = piece().height, f = kfEdit().face || { x: 0.04, y: 0.35, w: 0.22, h: 0.25 };
+  const side = Math.min(f.w * W, f.h * H) * 0.9, w = side / W, h = side / H;
+  c.src = { x: Math.min(Math.max(0, f.x + f.w / 2 - w / 2), 1 - w), y: Math.min(Math.max(0, f.y + f.h / 2 - h / 2), 1 - h), w, h };
+}
+function drawCircle() {
+  const c = S.p.crops.circle, on = !!(c && c.on);
+  $("#circOn").checked = on; $("#circOpts").classList.toggle("hidden", !on);
+  if (on) $("#circSize").value = c.d;
+  layoutBoxes();
+}
+function circleChanged() { S.p.crops.edited = true; layoutBoxes(); changed(false); }
+$("#circOn").onchange = (e) => {
+  let c = S.p.crops.circle;
+  if (!c) {   // first time: on the face, bottom-right over the gameplay (or top-left for gameplay-only)
+    c = S.p.crops.circle = { on: true, d: 0.34, x: isSplit() ? 0.78 : 0.24, y: isSplit() ? 0.86 : 0.17 };
+    circleOnFace(c);
+  }
+  c.on = e.target.checked; drawCircle(); circleChanged();
+  if (c.on) toast("Round facecam on — drag the red circle onto the face, then drag the bubble in the reel where you want it.", 6000);
+};
+$("#circSize").oninput = (e) => { const c = circ(); if (!c) return; c.d = +e.target.value; layoutBoxes(); };
+$("#circSize").onchange = () => circleChanged();
+$("#circFace").onclick = () => { const c = circ(); if (!c) return; circleOnFace(c); circleChanged(); };
+// the red circle on the source: move it, or resize from the dot (stays a true circle in pixels)
+$("#boxCircle").addEventListener("pointerdown", (e) => {
+  const c = circ(); if (!c) return;
+  e.preventDefault(); e.stopPropagation();
+  const resize = e.target.tagName === "I", wrap = $("#vwrap").getBoundingClientRect(), st = { ...c.src }, x0 = e.clientX, y0 = e.clientY;
+  const r = piece().width / piece().height;   // normalized h per normalized w for a pixel-square
+  const box = $("#boxCircle"); box.setPointerCapture(e.pointerId);
+  const mv = (ev) => {
+    const dx = (ev.clientX - x0) / wrap.width, dy = (ev.clientY - y0) / wrap.height;
+    if (resize) {
+      let w = Math.max(0.03, st.w + Math.max(dx, dy / r));
+      w = Math.min(w, 1 - st.x, (1 - st.y) / r);
+      c.src.w = w; c.src.h = w * r;
+    } else {
+      c.src.x = Math.min(Math.max(0, st.x + dx), 1 - c.src.w); c.src.y = Math.min(Math.max(0, st.y + dy), 1 - c.src.h);
+    }
+    layoutBoxes();
+  };
+  const up = () => { box.removeEventListener("pointermove", mv); box.removeEventListener("pointerup", up); circleChanged(); };
+  box.addEventListener("pointermove", mv); box.addEventListener("pointerup", up);
+});
+// move / resize the bubble on the reel. el = the element dragged, scale = its px per reel px (1080 wide)
+function dragBubble(e, el, wrapEl) {
+  const c = circ(); if (!c) return;
+  e.preventDefault(); e.stopPropagation();
+  const rc = wrapEl.getBoundingClientRect(), s = rc.width / 1080, resize = e.target.tagName === "I";
+  const st = { ...c }, x0 = e.clientX, y0 = e.clientY;
+  el.classList.add("dragging");
+  const mv = (ev) => {
+    const dx = (ev.clientX - x0) / s, dy = (ev.clientY - y0) / s;   // reel pixels
+    if (resize) c.d = +Math.min(0.7, Math.max(0.18, st.d + (dx + dy) / 1080)).toFixed(3);
+    const R = (c.d * 1080) / 2;
+    if (!resize) {
+      c.x = +(Math.min(Math.max(R, st.x * 1080 + dx), 1080 - R) / 1080).toFixed(4);
+      c.y = +(Math.min(Math.max(R, st.y * 1920 + dy), 1920 - R) / 1920).toFixed(4);
+    }
+    $("#circSize").value = c.d;
+  };
+  const up = () => {
+    window.removeEventListener("pointermove", mv); window.removeEventListener("pointerup", up);
+    el.classList.remove("dragging"); circleChanged();
+  };
+  window.addEventListener("pointermove", mv); window.addEventListener("pointerup", up);
+}
+$("#circGuide").addEventListener("pointerdown", (e) => dragBubble(e, $("#circGuide"), $("#phoneWrap")));
+const pvCircleHit = (e) => {   // is the pointer on the bubble in the little 9:16 preview?
+  const c = circ(); if (!c) return false;
+  const r = $("#pv").getBoundingClientRect(), s = r.width / 1080;
+  const px = (e.clientX - r.left) / s, py = (e.clientY - r.top) / s;
+  return Math.hypot(px - c.x * 1080, py - c.y * 1920) <= (c.d * 1080) / 2;
+};
+$("#pv").addEventListener("pointermove", (e) => $("#pv").classList.toggle("circHover", pvCircleHit(e)));
+$("#pv").addEventListener("pointerdown", (e) => { if (pvCircleHit(e)) dragBubble(e, $("#pv"), $("#pv")); });
+// keep the dashed bubble outline on the reel player in place
+(function circGuideLoop() {
+  const g = $("#circGuide"), wrap = $("#phoneWrap");
+  const tick = () => {
+    requestAnimationFrame(tick);
+    const c = circ();
+    g.classList.toggle("hidden", !c || $("#edBody").classList.contains("hidden"));
+    if (!c) return;
+    const s = wrap.clientWidth / 1080, D = c.d * 1080 * s;
+    Object.assign(g.style, { width: D + "px", height: D + "px", left: c.x * 1080 * s - D / 2 + "px", top: c.y * 1920 * s - D / 2 + "px" });
+  };
+  tick();
+})();
 window.addEventListener("resize", layoutBoxes);
 function drawCrops() {
   const c = S.p.crops;
   $("#noCam").classList.toggle("hidden", isSplit(c.layout));
   $("#layoutSel").value = c.layout;
+  drawCircle();
   const kl = $("#kfList"); kl.innerHTML = "";
   c.keyframes.forEach((k, i) => kl.append(h("div", { class: "kf" },
     h("label", { class: "chk" }, h("input", { type: "radio", name: "kf", checked: i === S.kf, onchange: () => { S.kf = i; layoutBoxes(); if (k.t != null) goto(S.piece, k.t + 0.5); } }),
@@ -1024,6 +1210,7 @@ $("#applyPreset").onclick = () => {
   const n = $("#presetSel").value, pr = S.st.presets.presets[n]; if (!pr) return;
   S.p.crops.layout = pr.layout; S.p.crops.preset = n; S.p.crops.edited = true;
   S.p.crops.keyframes = [{ t: null, face: { ...pr.face }, game: { ...pr.game } }]; S.kf = 0;
+  if (pr.circle) S.p.crops.circle = { ...pr.circle };
   changed(false); drawCrops(); showTab("crops"); toast(`Applied “${n}”`);
 };
 $("#delPreset").onclick = async () => {
@@ -1033,7 +1220,7 @@ $("#delPreset").onclick = async () => {
 $("#savePreset").onclick = async () => {
   const name = $("#presetName").value.trim(); if (!name) return toast("Name the preset first.");
   const k = kfEdit();
-  S.st.presets = await api("POST", "/api/presets", { name, layout: S.p.crops.layout, face: k.face, game: k.game,
+  S.st.presets = await api("POST", "/api/presets", { name, layout: S.p.crops.layout, face: k.face, game: k.game, circle: S.p.crops.circle || null,
     channel: $("#chanDefault").checked ? (S.p.source || {}).channel : null });
   S.p.crops.preset = name; changed(false); drawCrops(); toast(`Saved preset “${name}”`);
 };
@@ -1059,6 +1246,13 @@ $("#savePreset").onclick = async () => {
       } else d(fitGame(k.game, k), top, area);
     }
     else { g.filter = "blur(8px) brightness(.85)"; g.drawImage(V, (W - H * 9 / 16) / 2, 0, H * 9 / 16, H, 0, 0, 270, 480); g.filter = "none"; d(fitGame(k.game, k), 120, 240); }
+    const ci = circ();
+    if (ci) {
+      const sw = Math.min(ci.src.w * W, ci.src.h * H), r = (ci.d * 270) / 2, cx = ci.x * 270, cy = ci.y * 480;
+      g.save(); g.fillStyle = "#fff"; g.beginPath(); g.arc(cx, cy, r + Math.max(1, r / 22), 0, 2 * Math.PI); g.fill();
+      g.beginPath(); g.arc(cx, cy, r, 0, 2 * Math.PI); g.clip();
+      g.drawImage(V, ci.src.x * W, ci.src.y * H, sw, sw, cx - r, cy - r, 2 * r, 2 * r); g.restore();
+    }
     const y = (S.p.caption_style.y || defaultCapY()) / 4;
     g.strokeStyle = "rgba(255,212,0,.6)"; g.setLineDash([4, 4]); g.strokeRect(38, y - 14, 194, 28); g.setLineDash([]);
     g.fillStyle = "rgba(255,255,255,.18)"; g.fillRect(232, 250, 34, 160); g.fillRect(0, 418, 230, 62);
@@ -1500,7 +1694,7 @@ function ago(sec) {
 }
 async function openLive(refresh = false) {
   const grid = $("#liveGrid");
-  if (!LV.streams.length || refresh) grid.innerHTML = '<p class="hint">Checking who\'s live… (a few seconds)</p>';
+  if (!LV.streams.length || refresh) grid.innerHTML = '<p class="empty">Checking who\'s live…</p>';
   $("#liveRefresh").disabled = true;
   try {
     const r = await api("GET", "/api/live/now" + (refresh ? "?refresh=1" : ""));
@@ -1510,11 +1704,13 @@ async function openLive(refresh = false) {
   if (LV.search) pollSearch();
   loadWatchers();
   loadUpcoming(refresh);
+  loadCampaigns(refresh);
 }
 function drawLive(r) {
   const grid = $("#liveGrid"); grid.innerHTML = "";
   $("#liveChecked").textContent = "checked " + new Date(r.checked_at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  if (!r.streams.length) grid.append(h("p", { class: "hint" }, "None of your creators are live right now. Check again later, or add more creators."));
+  $("#liveCount").textContent = r.streams.length ? r.streams.length : "";
+  if (!r.streams.length) grid.append(h("p", { class: "empty" }, "Nobody's live right now."));
   r.streams.forEach((s, i) => {
     const card = h("div", { class: "liveCard" + (LV.sel && LV.sel.clip_url === s.clip_url ? " sel" : "") + (s.clip_url ? "" : " off") },
       h("div", { class: "lcThumb" }, s.thumbnail ? h("img", { src: s.thumbnail, alt: "", loading: "lazy", onerror: (e) => e.target.remove() }) : null,
@@ -1523,13 +1719,14 @@ function drawLive(r) {
       h("div", { class: "lcTitle" }, s.title || ""),
       h("div", { class: "hint" }, [s.viewers ? `${s.viewers.toLocaleString()} watching` : null, s.uptime ? `live for ${ago(s.uptime)}` : null].filter(Boolean).join(" · ")),
       s.note ? h("div", { class: "hint err" }, s.note) : null,
-      h("div", { class: "row" },
-        h("button", { class: "small primary", disabled: !s.clip_url, onclick: () => startWatch({ stream: s }) }, "🤖 Auto-clip"),
-        h("button", { class: "small", disabled: !s.clip_url, onclick: () => pickStream(s) }, "Pick moments myself"),
-        h("a", { class: "ghost small linkbtn", href: s.watch_url, target: "_blank", rel: "noopener" }, "Watch ↗")));
+      h("div", { class: "lcActions" },
+        h("button", { class: "small primary", disabled: !s.clip_url, onclick: () => startWatch({ stream: s }) }, "Auto-clip"),
+        h("button", { class: "small", disabled: !s.clip_url, onclick: () => pickStream(s) }, "Pick moments"),
+        h("a", { class: "ghost small linkbtn", href: s.watch_url, target: "_blank", rel: "noopener", title: "Watch on the site" }, "↗")));
     grid.append(card);
   });
-  $("#liveOffline").textContent = r.offline.length ? "Offline: " + r.offline.join(", ") : "";
+  const off = $("#liveOffline"); off.innerHTML = "";
+  if (r.offline.length) off.append(h("span", { class: "hint" }, "Offline"), ...r.offline.map((n) => h("span", { class: "offChip" }, n)));
 }
 function pickStream(s) {
   LV.sel = s; LV.search = null; clearTimeout(LV.poll);
@@ -1635,7 +1832,7 @@ async function startWatch(body) {
 }
 $("#watchGo").onclick = () => {
   const url = $("#watchUrl").value.trim();
-  if (!/^https?:\/\//.test(url)) return toast("Paste a full live link (https://…), or click 🤖 Auto-clip on a stream below.");
+  if (!/^https?:\/\//.test(url)) return toast("Paste a full live link (https://…), or click Auto-clip on a stream below.");
   startWatch({ url });
 };
 async function loadWatchers() {
@@ -1643,33 +1840,193 @@ async function loadWatchers() {
   if (location.hash !== "#/live") return;
   const r = await api("GET", "/api/live/watch").catch(() => null);
   if (!r) return;
-  const box = $("#watchList"); box.innerHTML = "";
+  const box = $("#watchList");
   const list = r.watchers.filter((w) => w.running || Date.now() / 1000 - (w.created || 0) < 24 * 3600);
-  for (const w of list) {
-    const st = w.stream || {}, PL = { youtube: "YouTube", twitch: "Twitch", kick: "Kick" }[st.platform] || "";
-    let status;
-    if (w.running && w.state === "waiting") {
-      const left = w.starts ? Math.round((w.starts - Date.now() / 1000) / 60) : null;
-      status = "⏳ Waiting for the stream to go live" + (w.starts ? ` — scheduled ${new Date(w.starts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` +
-        (left > 0 ? ` (in ${left >= 60 ? Math.floor(left / 60) + " h " : ""}${left % 60} min)` : " (any minute now)") : "") + ". Clipping starts by itself.";
-    } else if (w.scanning) status = `Scanning for moments… ${Math.round((w.progress || 0) * 100)}%` + (w.task ? ` · ${w.task}` : "");
-    else if (w.running && w.next_check) status = `Watching — next look in ${Math.max(0, Math.round((w.next_check - Date.now() / 1000) / 60))} min`;
-    else if (w.running) status = "Starting…";
-    else status = { ended: "Stream ended — finished", stopped: "Stopped", error: "Stopped by an error" }[w.state] || w.state;
-    const last = (w.log || []).slice(-1)[0] || "";
-    box.append(h("div", { class: "watchRow" + (w.running ? " on" : "") },
-      h("div", { class: "row" },
-        h("span", { class: "dot" + (w.running ? " live" : "") }),
-        h("b", { class: "grow" }, `${st.creator || ""} · ${PL}`, h("span", { class: "hint" }, `  → ${w.day} · ${w.per_hour}/hour`)),
-        w.running ? h("button", { class: "ghost small danger", onclick: async () => { await api("POST", `/api/live/watch/${w.id}/stop`); toast("Stopping auto-clip…"); setTimeout(loadWatchers, 800); } }, "Stop") : null),
-      h("div", { class: "hint" }, status + (w.chunks ? ` · ${w.chunks} part${w.chunks > 1 ? "s" : ""} checked` : "")),
-      w.error ? h("div", { class: "err" }, w.error.split("\n")[0]) : null,
-      w.reels.length ? h("div", { class: "row wrap" }, h("span", { class: "hint" }, `${w.reels.length} reel${w.reels.length > 1 ? "s" : ""}:`),
-        ...w.reels.map((x) => h("a", { class: "chip", href: `#/${enc(w.day)}/${enc(x.folder)}`, title: x.scenario }, x.folder.replace(/^reel-(\d+)-?/, "#$1 ").replace(/-/g, " ").slice(0, 34)))) : null,
-      last ? h("div", { class: "hint small" }, last.slice(9)) : null));
-  }
-  if (r.watchers.some((w) => w.running)) LV.wpoll = setTimeout(loadWatchers, 5000);
+  const open = new Set($$(".watchCard details[open]", box).map((x) => x.dataset.id));   // keep "Activity" open across refreshes
+  box.replaceChildren(...list.map((w) => watchCard(w, open.has(w.id))));
+  if (r.watchers.some((w) => w.running)) LV.wpoll = setTimeout(loadWatchers, document.hidden ? 60000 : 5000);
 }
+const reelLabel = (folder) => folder.replace(/^reel-(\d+)-?/, "#$1 ").replace(/-/g, " ").trim();
+function watchCard(w, logOpen) {
+  const st = w.stream || {}, PL = { youtube: "YouTube", twitch: "Twitch", kick: "Kick" }[st.platform] || "";
+  const mins = (t) => Math.max(0, Math.round((t - Date.now() / 1000) / 60));
+  let pill = w.state, pillCls = "off", line = "";
+  if (w.running && w.state === "waiting") {
+    pill = "Waiting"; pillCls = "wait";
+    line = "Starts by itself when the stream goes live" + (w.starts ? ` · scheduled ${new Date(w.starts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "");
+  } else if (w.scanning) {
+    pill = "Finding moments"; pillCls = "busy"; line = w.task || "Looking through the newest part of the stream…";
+  } else if (w.running) {
+    pill = "Watching"; pillCls = "on"; line = w.next_check ? `Next check in ${mins(w.next_check)} min` : "Starting…";
+  } else if (w.state === "ended") {
+    pill = "Finished"; pillCls = "done"; line = "The stream ended — every part was checked.";
+  } else if (w.state === "stopped") {
+    pill = "Stopped"; line = "Stopped. Resume carries on from where it left off.";
+  } else if (w.state === "error") {
+    // plain words for people; the technical message is still in Activity and on hover
+    const e = (w.error || "").split("\n")[0], techy = /index|range|key ?error|none ?type|attribute|traceback|errno|\w+Error/i.test(e);
+    pill = "Stopped"; pillCls = "bad";
+    line = (techy || !e ? "Something went wrong and it stopped." : e.replace(/\.$/, "") + ".") + " Resume carries on from where it left off.";
+  }
+  const reels = w.reels || [], shown = reels.slice(-8);
+  return h("div", { class: "watchCard" + (w.running ? " running" : "") },
+    h("div", { class: "wcThumb" }, st.thumbnail ? h("img", { src: st.thumbnail, alt: "", loading: "lazy", onerror: (e) => e.target.remove() }) : null,
+      PL ? h("span", { class: "lcPlat " + st.platform }, PL) : null),
+    h("div", { class: "wcBody" },
+      h("div", { class: "wcTop" },
+        h("b", {}, st.creator || "Stream"),
+        h("span", { class: "pill " + pillCls }, pillCls === "on" || pillCls === "busy" ? h("i", { class: "pdot" }) : null, pill),
+        h("span", { class: "grow" }),
+        !w.running ? h("button", { class: "small primary", title: "Carry on auto-clipping this stream from where it stopped",
+          onclick: async () => { await api("POST", `/api/live/watch/${w.id}/resume`); toast("Auto-clip resumed."); setTimeout(loadWatchers, 600); } }, "▶ Resume") : null,
+        w.running ? h("button", { class: "small ghost danger", onclick: async () => { await api("POST", `/api/live/watch/${w.id}/stop`); toast("Stopping auto-clip…"); setTimeout(loadWatchers, 800); } }, "Stop") : null),
+      h("div", { class: "wcSub" }, [st.title, `into “${w.day}”`, `${w.per_hour} reels/hour`].filter(Boolean).join(" · ")),
+      w.campaign || w.autopilot ? h("div", { class: "wcTags" },
+        w.campaign ? h("a", { class: "campTag", href: w.campaign.url, target: "_blank", rel: "noopener", title: "Open the campaign on Content Rewards" }, "💰 " + payText(w.campaign) + " · " + w.campaign.name) : null,
+        w.autopilot ? h("span", { class: "pill" }, "🤖 Auto-pilot") : null) : null,
+      h("div", { class: "wcLine" + (pillCls === "bad" ? " err" : "") }, line),
+      w.scanning ? h("div", { class: "bar small" }, h("i", { style: `width:${Math.round((w.progress || 0) * 100)}%` })) : null,
+      reels.length ? h("div", { class: "wcReels" },
+        h("span", { class: "hint" }, `${reels.length} reel${reels.length > 1 ? "s" : ""}${w.chunks ? ` from ${w.chunks} parts` : ""}:`),
+        reels.length > shown.length ? h("span", { class: "hint" }, `… ${reels.length - shown.length} earlier`) : null,
+        ...shown.map((x) => x.missing
+          ? h("span", { class: "chip gone", title: "Deleted — restore it from Recently deleted on the home page" }, reelLabel(x.folder).slice(0, 28))
+          : h("a", { class: "chip", href: `#/${enc(w.day)}/${enc(x.folder)}`, title: x.scenario }, reelLabel(x.folder).slice(0, 28)))) : null,
+      (w.log || []).length ? h("details", { class: "wcLog", "data-id": w.id, open: logOpen },
+        h("summary", {}, "Activity"),
+        h("div", { class: "logLines" }, ...w.log.slice().reverse().map((l) => h("div", {}, h("span", { class: "t" }, l.slice(0, 5)), " ", l.slice(9))))) : null));
+}
+
+/* Live tab ▸ Paid campaigns (Content Rewards) + Auto-pilot */
+const money = (c) => "$" + (c / 100).toLocaleString(undefined, { maximumFractionDigits: c % 100 ? 2 : 0 });
+const payText = (c) => (c.kind === "cpm" ? `${money(c.rate_cents)} / 1K views` : `${money(c.left_cents)} pool`);
+const PLAT_SHORT = { tiktok: "TikTok", youtube: "Shorts", instagram: "Reels", x: "X", facebook: "Facebook" };
+async function loadCampaigns(refresh = false) {
+  clearTimeout(LV.cpoll);
+  if (location.hash !== "#/live") return;
+  if (refresh) $("#campList").innerHTML = '<p class="empty">Checking Content Rewards…</p>';
+  const r = await api("GET", "/api/campaigns" + (refresh ? "?refresh=1" : "")).catch(() => null);
+  if (!r) { $("#campList").innerHTML = '<p class="empty">Couldn\'t reach Content Rewards right now.</p>'; return; }
+  LV.camp = r;
+  drawAutopilot(); drawCampaigns(); drawCool();
+  if (r.status.running) LV.cpoll = setTimeout(() => refreshApStatus(), 15000);
+}
+async function refreshApStatus() {
+  clearTimeout(LV.cpoll);
+  if (location.hash !== "#/live" || !LV.camp) return;
+  const r = await api("GET", "/api/autopilot").catch(() => null);
+  if (r) { LV.camp.status = r.status; LV.camp.prefs = r.prefs; drawApStatus(); drawCampaigns(); loadWatchers(); }
+  if (LV.camp.status.running) LV.cpoll = setTimeout(refreshApStatus, document.hidden ? 120000 : 15000);
+}
+async function saveAp(patch) {
+  try {
+    const r = await api("PUT", "/api/autopilot", patch);
+    LV.camp.prefs = r.prefs; LV.camp.status = r.status;
+  } catch (e) { /* toast already shown */ }
+  drawAutopilot(); drawCampaigns();
+  if (LV.camp.status.running) { clearTimeout(LV.cpoll); LV.cpoll = setTimeout(refreshApStatus, 4000); }
+}
+function drawAutopilot() {
+  const r = LV.camp, p = r.prefs;
+  $("#apOn").checked = !!p.on;
+  const ds = $("#apDay"); ds.innerHTML = "";
+  (S.st.days || []).forEach((d) => ds.append(h("option", { value: d, selected: d === (p.day || S.day) }, d)));
+  $("#apRate").value = String(p.per_hour || 4);
+  const favs = new Set((p.favorites || []).map((x) => x.toLowerCase()));
+  $("#apFavs").replaceChildren(...r.creators.map((n) => h("button", {
+    class: "favChip" + (favs.has(n.toLowerCase()) ? " on" : ""), title: favs.has(n.toLowerCase()) ? "Always clipped — click to stop" : "Click to always clip " + n,
+    onclick: () => { const f = new Set(p.favorites || []); [...f].some((x) => x.toLowerCase() === n.toLowerCase()) ? [...f].forEach((x) => x.toLowerCase() === n.toLowerCase() && f.delete(x)) : f.add(n); saveAp({ favorites: [...f] }); },
+  }, (favs.has(n.toLowerCase()) ? "★ " : "☆ ") + n)));
+  drawApStatus();
+}
+function drawApStatus() {
+  const st = LV.camp.status, p = LV.camp.prefs, box = $("#apStatus");
+  const camps = LV.camp.campaigns.filter((c) => c.clippable && !c.skipped && Object.keys(c.watch_channels || {}).length);
+  const n = camps.length + (p.favorites || []).length;
+  const when = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  box.replaceChildren(...[
+    h("div", { class: "apLine" },
+      h("span", { class: "pill " + (st.running ? "on" : "off") }, st.running ? h("i", { class: "pdot" }) : null, st.running ? "On" : "Off"),
+      h("span", {}, st.running
+        ? `Watching ${n} creators (${camps.length} paid campaigns + ${(p.favorites || []).length} favourites)` +
+          (st.busy ? " · checking who's live…" : st.checked ? ` · last check ${when(st.checked)}` + (st.next ? `, next ${when(st.next)}` : "") : "")
+        : `Turn it on to watch ${n} creators: ${camps.length} paid campaigns + ${(p.favorites || []).length} favourites.`)),
+    st.live && st.live.length ? h("div", { class: "apLive" }, h("span", { class: "hint" }, "Live now:"),
+      ...st.live.map((x) => h("span", { class: "chip" }, h("span", { class: "liveDot" }), " ", x.name, x.campaign ? " · 💰" : x.favorite ? " · ★" : ""))) : null,
+    st.log && st.log.length ? h("details", { class: "wcLog" }, h("summary", {}, "Activity"),
+      h("div", { class: "logLines" }, ...st.log.slice().reverse().map((l) => h("div", {}, h("span", { class: "t" }, l.slice(0, 5)), " ", l.slice(6))))) : null].filter(Boolean));
+}
+$("#apOn").onchange = (e) => saveAp({ on: e.target.checked, day: $("#apDay").value || S.day, per_hour: +$("#apRate").value });
+$("#apDay").onchange = (e) => saveAp({ day: e.target.value });
+$("#apRate").onchange = (e) => saveAp({ per_hour: +e.target.value });
+$("#campRefresh").onclick = () => loadCampaigns(true);
+async function drawCool(set) {
+  const r = await api(set === undefined ? "GET" : "PUT", "/api/cool", set === undefined ? undefined : { cool: set }).catch(() => null);
+  if (!r) return;
+  $("#coolOn").checked = r.cool;
+  $("#coolTip").innerHTML = r.groq ? "✓ Groq is on: the AI that finds moments runs online, not on your Mac."
+    : "Tip: the biggest heat is the local AI. Switch the hook writer (in any reel's Hook step) to <b>Groq online AI</b> with a free key, and finding moments runs online instead.";
+}
+$("#coolOn").onchange = (e) => { drawCool(e.target.checked); toast(e.target.checked ? "Cool mode on." : "Cool mode off — full power exports (hotter)."); };
+function campCard(c) {
+  const p = LV.camp.prefs, live = (LV.camp.status.live || []).find((x) => c.matched ? x.name === c.matched : x.campaign === c.name);
+  const chans = c.watch_channels || {}, hasCh = Object.keys(chans).length > 0;
+  let pill, cls;
+  if (!c.clippable) {
+    [pill, cls] = c.left_cents <= 0 ? ["Budget used up", "off"] : c.past_only ? ["Past stream only", "off"] : ["Logo needed", "off"];
+  } else if (c.skipped) [pill, cls] = ["Off", "off"];
+  else if (!hasCh) [pill, cls] = ["Needs a channel", "wait"];
+  else [pill, cls] = ["Auto-clips", "on"];
+  const pct = c.budget_cents ? Math.max(0, Math.min(100, (c.left_cents / c.budget_cents) * 100)) : 0;
+  const chEdit = h("div", { class: "chEdit hidden" },
+    ...["twitch", "kick", "youtube"].map((k) => h("input", { placeholder: k === "youtube" ? "YouTube @handle" : k[0].toUpperCase() + k.slice(1) + " name", value: (p.channels[c.id] || {})[k] || "", "data-k": k })),
+    h("button", { class: "small primary", onclick: (e) => {
+      const box = e.target.closest(".chEdit"), v = {};
+      box.querySelectorAll("input").forEach((i) => { if (i.value.trim()) v[i.dataset.k] = i.value.trim().replace(/^https?:\/\/(www\.)?(twitch\.tv|kick\.com|youtube\.com)\//, ""); });
+      saveAp({ channels: { ...p.channels, [c.id]: v } }).then(() => loadCampaigns());
+    } }, "Save"));
+  return h("div", { class: "campCard" + (c.clippable && !c.skipped && hasCh ? " active" : "") },
+    h("div", { class: "ccThumb", style: `--h:${[...(c.who || c.name)].reduce((a, ch) => (a * 31 + ch.charCodeAt(0)) % 360, 7)}` },
+      h("span", { class: "ccInit" }, (c.who || c.name).split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]).join("").toUpperCase()),
+      live ? h("span", { class: "lcLive" }, "LIVE") : null),
+    h("div", { class: "ccBody" },
+      h("div", { class: "ccTop" },
+        h("a", { class: "ccName", href: c.url, target: "_blank", rel: "noopener", title: "Open on Content Rewards" }, c.name),
+        h("span", { class: "pill " + cls }, pill)),
+      h("div", { class: "ccSub" }, [c.org, c.matched ? `✓ ${c.matched} is in your creators` : null, c.needs_application ? "needs approval to join" : null].filter(Boolean).join(" · ")),
+      h("div", { class: "ccPay" },
+        h("b", {}, payText(c)), c.kind === "cpm" && c.max_payout_cents ? h("span", { class: "hint" }, `up to ${money(c.max_payout_cents)} per clip`) : null,
+        c.kind === "pool" && c.min_creator_views ? h("span", { class: "hint" }, `${(c.min_creator_views / 1000).toLocaleString()}K total views to share it`) : null,
+        c.min_clip_views ? h("span", { class: "hint" }, `${(c.min_clip_views / 1000).toLocaleString()}K views per clip min`) : null),
+      c.kind === "cpm" ? h("div", { class: "budget" }, h("div", { class: "bar small" }, h("i", { style: `width:${pct.toFixed(1)}%` })),
+        h("span", { class: "hint" }, `${money(c.left_cents)} of ${money(c.budget_cents)} left`)) : null,
+      h("div", { class: "ccMeta" },
+        ...(c.platforms || []).map((x) => h("span", { class: "tag" }, PLAT_SHORT[x] || x)),
+        ...Object.entries(chans).map(([k, v]) => h("span", { class: "tag ch " + k }, `${k}: ${v}`))),
+      chEdit,
+      h("div", { class: "ccActions" },
+        c.clippable ? h("label", { class: "chk", title: "Let Auto-pilot clip this campaign" },
+          h("input", { type: "checkbox", checked: !c.skipped, onchange: (e) => {
+            const sk = new Set(p.skip || []); e.target.checked ? sk.delete(c.id) : sk.add(c.id); saveAp({ skip: [...sk] });
+          } }), "Auto-pilot") : null,
+        c.clippable ? h("button", { class: "ghost small", onclick: (e) => e.target.closest(".ccBody").querySelector(".chEdit").classList.toggle("hidden") },
+          hasCh ? "Edit channel" : "+ Add channel") : null,
+        c.rules_url ? h("a", { class: "ghost small linkbtn", href: c.rules_url, target: "_blank", rel: "noopener" }, "Rules ↗") : null,
+        h("a", { class: "ghost small linkbtn", href: c.url, target: "_blank", rel: "noopener" }, "Join / submit ↗"))));
+}
+function drawCampaigns() {
+  const r = LV.camp, list = $("#campList");
+  const ok = r.campaigns.filter((c) => c.clippable), no = r.campaigns.filter((c) => !c.clippable);
+  $("#campCount").textContent = ok.length || "";
+  list.replaceChildren(...[
+    ...(ok.length ? ok.map(campCard) : [h("p", { class: "empty" }, "No streamer campaigns that can be clipped live right now.")]),
+    no.length ? h("details", { class: "campMore" }, h("summary", {}, `${no.length} more that can't be auto-clipped (past stream only, logo campaigns, or budget used up)`),
+      h("div", { class: "campList" }, ...no.map(campCard))) : null].filter(Boolean));
+}
+
+document.addEventListener("visibilitychange", () => {   // back on the tab: catch up at once
+  if (!document.hidden && location.hash === "#/live") { loadWatchers(); if (LV.camp) refreshApStatus(); }
+});
 
 /* Live tab ▸ Coming up: scheduled streams from your creators' YouTube channels */
 function whenText(t) {
@@ -1685,12 +2042,13 @@ async function loadUpcoming(refresh = false) {
   const grid = $("#soonGrid");
   const [r, w] = await Promise.all([api("GET", "/api/live/upcoming" + (refresh ? "?refresh=1" : "")).catch(() => null),
                                     api("GET", "/api/live/watch").catch(() => ({ watchers: [] }))]);
-  if (!r) { grid.innerHTML = '<p class="hint">Couldn\'t check scheduled streams right now.</p>'; return; }
-  $("#soonNote").textContent = "— " + r.note;
+  if (!r) { grid.innerHTML = '<p class="empty">Couldn\'t check scheduled streams right now.</p>'; return; }
+  $("#soonNote").textContent = "YouTube only";
+  $("#soonNote").title = r.note;
   const vid = (u) => ((u || "").match(/(?:youtu\.be\/|[?&]v=|\/live\/)([\w-]{11})/) || [])[1] || u;
   const set = new Set(w.watchers.filter((x) => x.running).flatMap((x) => [vid(x.stream && x.stream.watch_url), vid(x.stream && x.stream.clip_url)]));
   grid.innerHTML = "";
-  if (!r.streams.length) grid.append(h("p", { class: "hint" }, "No scheduled streams from your creators right now."));
+  if (!r.streams.length) grid.append(h("p", { class: "empty" }, "No scheduled streams right now."));
   for (const s of r.streams) {
     const armed = set.has(vid(s.watch_url));
     grid.append(h("div", { class: "liveCard" },
@@ -1700,8 +2058,8 @@ async function loadUpcoming(refresh = false) {
       h("div", { class: "lcTitle" }, s.title),
       h("div", { class: "hint" }, "🗓 " + whenText(s.starts)),
       h("div", { class: "row" },
-        armed ? h("span", { class: "badge ok" }, "✓ Auto-clip is set — starts by itself")
-          : h("button", { class: "small primary", onclick: async () => { await startWatch({ url: s.watch_url }); loadUpcoming(); } }, "🤖 Auto-clip when it starts"),
+        armed ? h("span", { class: "badge ok" }, "✓ Auto-clip is set")
+          : h("button", { class: "small primary", onclick: async () => { await startWatch({ url: s.watch_url }); loadUpcoming(); } }, "Auto-clip when it starts"),
         h("a", { class: "ghost small linkbtn", href: s.watch_url, target: "_blank", rel: "noopener" }, "Open ↗"))));
   }
 }

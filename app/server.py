@@ -13,8 +13,8 @@ from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import ai, analysis, live, media, render, story, system
-from .config import (APP_DIR, DEFAULT_VOICE, OLLAMA_MODEL, PRESETS_FILE, VOICES, fmt_time, parse_ranges,
+from . import ai, analysis, campaigns, live, media, render, story, system
+from .config import (first_line, APP_DIR, DEFAULT_VOICE, OLLAMA_MODEL, PRESETS_FILE, VOICES, fmt_time, parse_ranges,
                      read_json, reels_root, safe_name, save_settings, settings, slug, write_json)
 
 app = FastAPI(title="Reelmaker")
@@ -62,7 +62,32 @@ async def no_stale_ui(request, call_next):
 LOCK = threading.RLock()
 JOBS: dict[str, dict] = {}            # reel id -> live job status
 PIPE = ThreadPoolExecutor(max_workers=1)   # fetch / transcribe / analyze, one reel at a time
-RENDER = ThreadPoolExecutor(max_workers=1)
+class _RenderQueue:
+    """One render at a time, but a preview/export you click jumps ahead of automatic exports (live auto-clip, batches)."""
+    def __init__(self):
+        import heapq, itertools
+        self._heap, self._n, self._cv = [], itertools.count(), threading.Condition()
+        self._push, self._pop = heapq.heappush, heapq.heappop
+        threading.Thread(target=self._run, daemon=True, name="render").start()
+
+    def submit(self, fn, *args, urgent: bool = False):
+        with self._cv:
+            self._push(self._heap, (0 if urgent else 1, next(self._n), fn, args))
+            self._cv.notify()
+
+    def _run(self):
+        while True:
+            with self._cv:
+                while not self._heap:
+                    self._cv.wait()
+                _, _, fn, args = self._pop(self._heap)
+            try:
+                fn(*args)
+            except Exception:
+                traceback.print_exc()
+
+
+RENDER = _RenderQueue()
 
 EDITABLE = {"name", "segments", "cold_open", "crops", "hook", "captions", "caption_style"}
 
@@ -248,6 +273,23 @@ def source_key(src: dict) -> str:
     return hashlib.sha1(k.encode()).hexdigest()[:12]
 
 
+def _covering_scan(src: dict, ranges: list) -> dict | None:
+    """A finished scan of a window (live auto-clip / long-range search) that covers these ranges — its transcript
+    can be reused instead of transcribing the same audio again."""
+    import re as _re
+    from .config import DATA_DIR
+    if not ranges:
+        return None
+    lo, hi = min(r["start"] for r in ranges), max(r["end"] for r in ranges)
+    for f in (DATA_DIR / "cache" / source_key(src)).glob("scan-*-*.json"):
+        m = _re.match(r"scan-(\d+)-(\d+)\.json$", f.name)
+        if m and int(m.group(1)) <= lo and int(m.group(2)) >= hi:
+            sc = read_json(f, {})
+            if sc.get("done") and sc.get("words") is not None:
+                return sc
+    return None
+
+
 def full_scan(d: Path, src: dict, win: dict | None = None) -> dict:
     """Whole-video analysis (cached per source): full file, transcript, loudness, webcam box + movement.
     With a search window, only that part is scanned; times inside are relative to scan["offset"]."""
@@ -369,7 +411,7 @@ def pipeline(d: Path):
                     log(d, "This is a live stream that's still running — clipping straight from it (anything already streamed can be fetched).")
                 update(d, source=src)
             except media.MediaError as e:
-                log(d, f"Couldn't read video details ({str(e).splitlines()[-1][:120]}); trying the download anyway.")
+                log(d, f"Couldn't read video details ({first_line(e, last=True)[:120]}); trying the download anyway.")
         scan = None
         if not p.get("ranges"):
             update(d, state="locating")
@@ -380,7 +422,7 @@ def pipeline(d: Path):
         else:
             from .config import DATA_DIR
             sc = read_json(DATA_DIR / "cache" / source_key(src) / "scan.json", {})
-            scan = sc if sc.get("done") else None
+            scan = sc if sc.get("done") else _covering_scan(src, p["ranges"])
             if scan:
                 set_job(d, plan=make_plan(False, src["type"] == "youtube", True))
         update(d, state="fetching")
@@ -459,11 +501,15 @@ def pipeline(d: Path):
         if preset_name and preset_name in pr["presets"]:
             ps = pr["presets"][preset_name]
             crops = {"layout": ps["layout"], "keyframes": [{"t": None, "face": ps["face"], "game": ps["game"]}], "preset": preset_name}
+            if ps.get("circle"):
+                crops["circle"] = dict(ps["circle"])
             face_changes = []
             log(d, f"Applied your saved layout “{preset_name}”.")
         elif fixed:   # you already fixed the layout on another reel of this video: use that
             fc = fixed[1]["crops"]
             crops = {"layout": fc["layout"], "keyframes": [dict(fc["keyframes"][0], t=None)], "edited": True}
+            if fc.get("circle"):
+                crops["circle"] = dict(fc["circle"])
             face_changes = []
             log(d, f"Using the layout you set on {fixed[0].name} (same video).")
         elif cam:
@@ -518,7 +564,8 @@ def pipeline(d: Path):
             res = story.smart_cut([w for w in words if w["piece"] == i], profiles[i], motions[i],
                                   [x for x in peaks if x["piece"] == i], r["start"], r["end"],
                                   p.get("scenario", ""), p.get("creator", ""), t_i, silences[i],
-                                  avoid=other_hooks(d) if i == 0 else None)
+                                  avoid=other_hooks(d) if i == 0 else None,
+                                  hard_end=pieces[i]["offset"] + pieces[i]["length"] - 0.3)
             for s0, e0 in res["segments"]:
                 segments.append({"id": analysis.uid(), "piece": i, "range": i, "start": s0, "end": e0, "enabled": True})
             if i == 0:
@@ -566,19 +613,20 @@ def pipeline(d: Path):
             log(d, "Cancelled.")
         else:
             traceback.print_exc()
-            update(d, state="error", error=str(e)[:3000])
-            log(d, "Stopped: " + str(e).splitlines()[0][:200])
+            update(d, state="error", error=(str(e).strip() or f"{type(e).__name__} — the footage couldn't be fetched. Click Try again.")[:3000])
+            log(d, "Stopped: " + first_line(e)[:200])
         set_job(d, stage="error", progress=0, task=None, span=None)
     finally:
         media.CTX.tag = None
         media.CTX.report = None
 
 
-def queue_render(d: Path, final: bool, learn: bool = True, then_final: bool = False):
-    """Put a render in line. The reel shows "waiting to start" until its turn (one render at a time)."""
+def queue_render(d: Path, final: bool, learn: bool = True, then_final: bool = False, urgent: bool = False):
+    """Put a render in line. The reel shows "waiting to start" until its turn (one render at a time).
+    urgent: you clicked it — it goes before automatic exports that are still waiting."""
     set_job(d, render="final" if final else "draft", render_progress=0, render_phase="Waiting for its turn…",
             render_started=time.time(), render_error=None, render_done=None)
-    RENDER.submit(do_render, d, final, learn, then_final)
+    RENDER.submit(do_render, d, final, learn, then_final, urgent=urgent)
 
 
 def do_render(d: Path, final: bool, learn: bool = True, then_final: bool = False):
@@ -709,6 +757,8 @@ def live_search(d: Path):
         off = scan.get("offset", 0.0)
         for i, c in enumerate(found):
             c["start"] = round(c["start"] + off, 1); c["end"] = round(c["end"] + off, 1)
+            c["scenario"] = _name_creator(c.get("scenario") or "", st["creator"])
+            c.update({k: v for k, v in _widen(c, a, b).items() if k in ("start", "end")})
             c["said"] = " ".join(w["w"] for w in scan["words"] if c["start"] <= w["s"] + off < c["end"])[:400]
             c["id"] = i
         update(d, state="ready", moments=found, searched=[a, b])
@@ -719,7 +769,7 @@ def live_search(d: Path):
         if not cancelled:
             traceback.print_exc()
         update(d, state="error", error="Cancelled." if cancelled else str(e)[:2000])
-        log(d, "Cancelled." if cancelled else "Stopped: " + str(e).splitlines()[0][:200])
+        log(d, "Cancelled." if cancelled else "Stopped: " + first_line(e)[:200])
         set_job(d, stage="error", progress=0, task=None, span=None)
     finally:
         media.CTX.tag = None
@@ -734,7 +784,7 @@ def api_live_search(body: dict = Body(...)):
     sid = time.strftime("%Y%m%d-%H%M%S") + "-" + analysis.uid()[:4]
     d = live_dir() / sid
     d.mkdir()
-    keep = {k: st.get(k) for k in ("creator", "platform", "handle", "title", "clip_url", "watch_url", "thumbnail")}
+    keep = {k: st.get(k) for k in ("creator", "platform", "handle", "title", "clip_url", "watch_url", "thumbnail", "started")}
     save(d, {"stream": keep, "minutes": int(body.get("minutes") or 0), "count": int(min(10, max(1, int(body.get("count") or 3)))),
              "target": int(body.get("target") or 0), "state": "queued", "log": [], "created": time.time()})
     set_job(d, stage="queued", progress=0)
@@ -861,12 +911,22 @@ def watcher(wid: str):
         log(d, f"Auto-clipping {st['creator']} ({st['platform'].title()}): every {WATCH_CHUNK // 60} min of new stream, "
                f"up to {per_chunk} reel{'s' if per_chunk > 1 else ''} into “{day}”, exported automatically.")
         ended_checks = 0
+        misses = 0
         while not stop.is_set():
             p = load(d)
+            _retry_failed_reels(d, p)
             try:
                 head = live.stream_position(st)
+                misses = 0
             except Exception as e:
-                log(d, f"Couldn't reach the stream ({str(e).splitlines()[0][:100]}); trying again in a minute.")
+                misses += 1
+                # several misses in a row and the site says it's over: the stream ended — finish cleanly
+                if misses >= 3 and not live.still_live(st):
+                    update(d, state="ended")
+                    log(d, "The stream has ended. Auto-clipping stopped.")
+                    break
+                if misses == 1 or misses % 5 == 0:   # don't fill the log with the same line every minute
+                    log(d, f"Couldn't reach the stream ({first_line(e)[:100]}); trying again every minute.")
                 if _wait(stop, 60):
                     break
                 continue
@@ -875,6 +935,13 @@ def watcher(wid: str):
                 start = max(0.0, head - WATCH_CHUNK - 15)
                 update(d, next_start=start)
             end = head - 15
+            if head <= 0:
+                misses += 1
+                if misses == 1 or misses % 10 == 0:
+                    log(d, "The stream's recording isn't readable yet (0 s so far) — checking again every minute.")
+                if _wait(stop, 60):
+                    break
+                continue
             live_now = live.still_live(st)
             if end - start < WATCH_CHUNK and live_now:
                 wait = max(30.0, WATCH_CHUNK - (end - start))
@@ -893,7 +960,7 @@ def watcher(wid: str):
                     break
                 continue
             # ---- scan the new part (queued with the other reels so only one heavy job runs at a time)
-            a, b = max(0.0, start - WATCH_OVERLAP), end
+            a, b = max(0.0, start - WATCH_OVERLAP), min(end, start + WATCH_CHUNK)
             log(d, f"Scanning {fmt_time(a)}–{fmt_time(b)} for the best moments…")
             fut = PIPE.submit(_watch_scan, d, src, a, b, per_chunk, st["creator"], p.get("target") or 0)
             while not fut.done():
@@ -905,7 +972,7 @@ def watcher(wid: str):
             try:
                 found = fut.result()
             except Exception as e:
-                log(d, f"Scan failed ({str(e).splitlines()[0][:150]}); will try this part again in a minute.")
+                log(d, f"Scan failed ({first_line(e)[:150]}); will try this part again in a minute.")
                 if _wait(stop, 60):
                     break
                 continue
@@ -913,7 +980,7 @@ def watcher(wid: str):
             new = [m for m in found if not _overlaps(m, done)]
             if new:
                 r = create_reels(day, {"source": {"type": "youtube", "url": st["clip_url"]}, "creator": st["creator"],
-                                       "target": p.get("target") or 0, "auto_export": True,
+                                       "target": p.get("target") or 0, "auto_export": True, "campaign": p.get("campaign"),
                                        "moments": [{"ranges": [{"start": m["start"], "end": m["end"]}],
                                                     "scenario": m.get("scenario") or ""} for m in new]})
                 p = load(d)
@@ -940,11 +1007,61 @@ def watcher(wid: str):
     except Exception as e:
         traceback.print_exc()
         update(d, state="error", error=str(e)[:1500])
-        log(d, "Stopped: " + str(e).splitlines()[0][:200])
+        log(d, "Stopped: " + first_line(e)[:200])
     finally:
         _keep_awake(False, w)
         set_job(d, stage="ready", progress=1.0, task=None, span=None, next_check=None)
         WATCHERS.pop(wid, None)
+
+
+WATCH_MIN_LEN = 35.0   # a moment shorter than this gets context around it (a 7-second reel isn't a reel)
+
+
+def _name_creator(text: str, creator: str) -> str:
+    """The AI writes "Creator reacts…" / "The streamer…": say who it is, so names and hooks make sense."""
+    import re as _re
+    if not creator or not text:
+        return text or ""
+    return _re.sub(r"\b(?:the |a )?(?:creator|streamer|content creator)\b", creator, text, flags=_re.I)
+
+
+def _widen(m: dict, lo: float, hi: float, min_len: float = WATCH_MIN_LEN) -> dict:
+    n = m["end"] - m["start"]
+    if n < min_len and hi - lo >= min_len:
+        pad = (min_len - n) / 2
+        a = max(lo, m["start"] - pad * 1.3)   # a bit more lead-in than tail: the set-up matters
+        b = min(hi, a + min_len)
+        a = max(lo, b - min_len)
+        m = {**m, "start": round(a, 1), "end": round(b, 1)}
+    return m
+
+
+def _retry_failed_reels(d: Path, p: dict):
+    """Hands-free means hands-free: reels this auto-clip made that stopped with an error get another go (twice at most)."""
+    tries = dict(p.get("retries") or {})
+    changed = False
+    for r in p.get("reels") or []:
+        rd = reels_root() / (p.get("day") or "") / r["folder"]
+        q = load(rd) if (rd / "project.json").exists() else {}
+        if q.get("state") != "error" or (q.get("error") or "").startswith("Cancelled"):
+            continue
+        n = tries.get(r["folder"], 0)
+        if n >= 2:
+            continue
+        tries[r["folder"]] = n + 1
+        changed = True
+        log(d, f"{reelLabel(r['folder'])} stopped with an error — trying it again ({n + 1}/2).")
+        media.CANCELLED.discard(rid(rd))
+        update(rd, state="queued", error=None)
+        set_job(rd, stage="queued", progress=0, task=None)
+        PIPE.submit(pipeline, rd)
+    if changed:
+        update(d, retries=tries)
+
+
+def reelLabel(folder: str) -> str:
+    import re as _re
+    return _re.sub(r"^reel-(\d+)-?", r"#\1 ", folder).replace("-", " ").strip()
 
 
 def _watch_scan(d: Path, src: dict, a: float, b: float, count: int, creator: str, target: int) -> list:
@@ -961,6 +1078,8 @@ def _watch_scan(d: Path, src: dict, a: float, b: float, count: int, creator: str
         off = scan.get("offset", 0.0)
         for c in found:
             c["start"] = round(c["start"] + off, 1); c["end"] = round(c["end"] + off, 1)
+            c["scenario"] = _name_creator(c.get("scenario") or "", creator)
+        found = [_widen(c, a, b) for c in found]
         set_job(d, stage="ready", progress=1.0, task=None, span=None)
         # the scan copy is only needed once: don't let a long stream fill the disk
         from .config import DATA_DIR
@@ -983,6 +1102,9 @@ def _same_video(a: str | None, b: str | None) -> bool:
 
 def start_watcher(wid: str):
     import threading as _th
+    old = WATCHERS.get(wid)
+    if old and old.get("thread") and old["thread"].is_alive():
+        return   # already running: never clip the same stream twice
     WATCHERS[wid] = {"stop": _th.Event(), "awake": None}
     t = _th.Thread(target=watcher, args=(wid,), daemon=True, name=f"watch-{wid}")
     WATCHERS[wid]["thread"] = t
@@ -1004,7 +1126,7 @@ def api_watch_start(body: dict = Body(...)):
         except media.MediaError as e:
             raise HTTPException(400, str(e))
         except Exception as e:
-            raise HTTPException(400, f"Couldn't open that link: {str(e).splitlines()[0][:200]}")
+            raise HTTPException(400, f"Couldn't open that link: {first_line(e)[:200]}")
     if not st or not (st.get("clip_url") or waiting):
         raise HTTPException(400, "That stream can't be clipped (no recording of it is available).")
     for wid, w in WATCHERS.items():
@@ -1018,10 +1140,14 @@ def api_watch_start(body: dict = Body(...)):
     wid = time.strftime("%Y%m%d-%H%M%S") + "-" + analysis.uid()[:4]
     d = watch_dir() / wid
     d.mkdir()
-    keep = {k: st.get(k) for k in ("creator", "platform", "handle", "title", "clip_url", "watch_url", "thumbnail")}
+    keep = {k: st.get(k) for k in ("creator", "platform", "handle", "title", "clip_url", "watch_url", "thumbnail", "started")}
+    camp = body.get("campaign")
+    if camp is None:
+        camp = campaigns.for_creator(st.get("creator") or "", {st.get("platform"): st.get("handle")} if st.get("handle") else None)
     save(d, {"stream": keep, "day": day, "per_hour": int(min(12, max(1, int(body.get("per_hour") or 4)))),
              "target": int(body.get("target") or 0), "state": "waiting" if waiting else "starting", "log": [],
-             "created": time.time(), "reels": [], "clipped": [], "starts": (waiting or {}).get("starts")})
+             "created": time.time(), "reels": [], "clipped": [], "starts": (waiting or {}).get("starts"),
+             "campaign": camp or None, "autopilot": bool(body.get("autopilot"))})
     start_watcher(wid)
     return {"id": wid, "waiting": bool(waiting), "starts": (waiting or {}).get("starts")}
 
@@ -1038,12 +1164,31 @@ def api_watch_list():
             p["state"] = "stopped"
         j = JOBS.get(rid(d), {})
         out.append({"id": d.name, "stream": p.get("stream"), "day": p.get("day"), "state": p.get("state"),
-                    "running": running, "reels": p.get("reels") or [], "chunks": p.get("chunks") or 0,
+                    "running": running, "reels": [dict(r, missing=not (reels_root() / (p.get("day") or "") / r["folder"]).is_dir()) for r in p.get("reels") or []], "chunks": p.get("chunks") or 0,
                     "position": p.get("position"), "next_check": j.get("next_check"), "error": p.get("error"),
                     "scanning": running and j.get("stage") in ("locate", "cut"), "progress": j.get("progress"),
-                    "task": (j.get("task") or {}).get("label"), "log": (p.get("log") or [])[-6:],
-                    "per_hour": p.get("per_hour"), "created": p.get("created"), "starts": p.get("starts")})
+                    "task": (j.get("task") or {}).get("label"), "log": (p.get("log") or [])[-40:],
+                    "per_hour": p.get("per_hour"), "created": p.get("created"), "starts": p.get("starts"),
+                    "campaign": p.get("campaign"), "autopilot": p.get("autopilot")})
     return {"watchers": out}
+
+
+@app.post("/api/live/watch/{wid}/resume")
+def api_watch_resume(wid: str):
+    """Carry on auto-clipping a stream that stopped (an error, a restart, or Stop) from where it left off."""
+    wid = safe_name(wid)
+    d = watch_dir() / wid
+    p = load(d)
+    if not p:
+        raise HTTPException(404, "Not found")
+    if wid in WATCHERS:
+        return {"ok": True}
+    if not (reels_root() / (p.get("day") or "")).is_dir():
+        raise HTTPException(400, f"The day folder “{p.get('day')}” doesn't exist any more.")
+    update(d, state="starting", error=None)
+    log(d, "Resumed — carrying on from where it stopped.")
+    start_watcher(wid)
+    return {"ok": True}
 
 
 @app.post("/api/live/watch/{wid}/stop")
@@ -1064,6 +1209,165 @@ def _resume_watchers():
             p = load(d)
             if p.get("state") in ("watching", "starting", "waiting") and time.time() - p.get("updated", 0) < 6 * 3600:
                 start_watcher(d.name)
+    except Exception:
+        traceback.print_exc()
+
+
+# ------------------------------------------------------------------ Auto-pilot: paid campaigns + favourites, hands-free
+# When it's on, every few minutes it looks at the streamers of paid Content Rewards campaigns (and your favourite
+# creators), and starts an auto-clip for whoever just went live. It only runs while you've switched it on.
+
+AUTOPILOT: dict = {"thread": None, "stop": None, "checked": None, "next": None, "live": [], "log": [], "busy": False}
+AUTOPILOT_EVERY = 5 * 60
+
+
+def _ap_log(msg: str):
+    AUTOPILOT["log"] = (AUTOPILOT["log"] + [f"{time.strftime('%H:%M')} {msg}"])[-40:]
+
+
+def _ap_running_for(name: str, clip_url: str | None) -> bool:
+    key = campaigns._norm(name)
+    for wid in list(WATCHERS):
+        o = load(watch_dir() / wid).get("stream", {})
+        if (clip_url and o.get("clip_url") == clip_url) or campaigns._norm(o.get("creator")) == key:
+            return True
+    return False
+
+
+def autopilot_tick():
+    p = campaigns.prefs()
+    if not p["on"]:
+        return
+    AUTOPILOT["busy"] = True
+    try:
+        day = p["day"] or settings().get("last_day") or ""
+        if not day or not (reels_root() / day).is_dir():
+            _ap_log("Pick a day folder for Auto-pilot's reels first.")
+            return
+        try:
+            camps = campaigns.fetch()["campaigns"]
+        except Exception as e:
+            camps = []
+            _ap_log(f"Couldn't read Content Rewards campaigns ({first_line(e)[:80]}); watching favourites only.")
+        tg = [t for t in campaigns.targets(live.creators(), camps, p) if not _ap_running_for(t["name"], None)]
+        jobs = [(t, plat) for t in tg for plat in live.PLATFORMS if t.get(plat)]
+        from concurrent.futures import ThreadPoolExecutor as _TP
+        with _TP(6) as ex:
+            res = list(ex.map(lambda j: live._check({"name": j[0]["name"], j[1]: j[0][j[1]]}, j[1]), jobs))
+        found, seen = [], set()
+        for (t, plat), stv in zip(jobs, res):
+            if not stv or campaigns._norm(t["name"]) in seen:
+                continue                       # one stream per creator (a simulcast on two sites = one auto-clip)
+            seen.add(campaigns._norm(t["name"]))
+            found.append((t, stv))
+        AUTOPILOT["live"] = [{"name": t["name"], "platform": stv["platform"], "campaign": (t.get("campaign") or {}).get("name"),
+                              "favorite": bool(t.get("favorite")), "clippable": bool(stv.get("clip_url"))} for t, stv in found]
+        for t, stv in found:
+            if not stv.get("clip_url") or _ap_running_for(t["name"], stv.get("clip_url")):
+                continue
+            stv["creator"] = t["name"]
+            camp = campaigns.tag(t.get("campaign"))
+            try:
+                api_watch_start({"stream": stv, "day": day, "per_hour": p["per_hour"], "campaign": camp or {}, "autopilot": True})
+                why = f"paid campaign: {camp['name']}" if camp else "favourite creator"
+                _ap_log(f"{t['name']} is live on {stv['platform'].title()} — auto-clip started ({why}).")
+            except HTTPException as e:
+                if e.status_code != 409:
+                    _ap_log(f"{t['name']} is live but auto-clip couldn't start: {e.detail}")
+    finally:
+        AUTOPILOT["busy"] = False
+        AUTOPILOT["checked"] = time.time()
+
+
+def _autopilot_loop(stop):
+    while not stop.is_set():
+        try:
+            autopilot_tick()
+        except Exception as e:
+            traceback.print_exc()
+            _ap_log("Check failed: " + first_line(e)[:120])
+        every = AUTOPILOT_EVERY * (2 if system.on_battery() else 1)    # on battery: every 10 min
+        AUTOPILOT["next"] = time.time() + every
+        if stop.wait(every):
+            break
+
+
+def autopilot_apply():
+    """Start or stop the Auto-pilot loop to match the saved switch."""
+    on = campaigns.prefs()["on"]
+    t = AUTOPILOT.get("thread")
+    if on and not (t and t.is_alive()):
+        AUTOPILOT["stop"] = threading.Event()
+        AUTOPILOT["thread"] = threading.Thread(target=_autopilot_loop, args=(AUTOPILOT["stop"],), daemon=True, name="autopilot")
+        AUTOPILOT["thread"].start()
+        _ap_log("Auto-pilot on.")
+    elif not on and t and t.is_alive():
+        AUTOPILOT["stop"].set()
+        _ap_log("Auto-pilot off. Auto-clips already running carry on until their stream ends (or you stop them).")
+
+
+def _ap_status() -> dict:
+    t = AUTOPILOT.get("thread")
+    return {"running": bool(t and t.is_alive()), "checked": AUTOPILOT["checked"], "next": AUTOPILOT["next"],
+            "busy": AUTOPILOT["busy"], "live": AUTOPILOT["live"], "log": AUTOPILOT["log"][-12:]}
+
+
+@app.get("/api/campaigns")
+def api_campaigns(refresh: bool = False):
+    try:
+        data = campaigns.fetch(refresh=refresh)
+    except Exception as e:
+        raise HTTPException(502, f"Couldn't reach Content Rewards: {first_line(e)[:200]}")
+    p = campaigns.prefs()
+    crs = live.creators()
+    out = []
+    for c in data["campaigns"]:
+        m = campaigns.match(c, crs)
+        chans = {**(c.get("channels") or {}), **(p["channels"].get(c["id"]) or {})}
+        if m:
+            chans = {**{k: m.get(k) for k in live.PLATFORMS if m.get(k)}, **chans}
+        out.append({**campaigns.public(c), "matched": m.get("name") if m else None, "watch_channels": chans,
+                    "clippable": campaigns.clippable(c), "skipped": c["id"] in p["skip"]})
+    return {"campaigns": out, "checked_at": data["checked_at"], "total": data.get("total"), "prefs": p,
+            "creators": [c.get("name") for c in crs], "status": _ap_status()}
+
+
+@app.put("/api/autopilot")
+def api_autopilot(body: dict = Body(...)):
+    p = campaigns.prefs()
+    for k in ("on", "day", "per_hour", "favorites", "skip", "channels"):
+        if k in body:
+            p[k] = body[k]
+    p["per_hour"] = int(min(12, max(1, int(p.get("per_hour") or 4))))
+    if p["on"] and (not p["day"] or not (reels_root() / p["day"]).is_dir()):
+        raise HTTPException(400, "Pick the day folder Auto-pilot should put its reels in.")
+    save_settings(autopilot=p)
+    autopilot_apply()
+    if p["on"] and body.get("on"):
+        threading.Thread(target=lambda: (autopilot_tick()), daemon=True).start()   # look right away, not in 5 min
+    return {"prefs": p, "status": _ap_status()}
+
+
+@app.get("/api/cool")
+def api_cool_get():
+    return {"cool": system.cool_mode(), "groq": story.online_on()}
+
+
+@app.put("/api/cool")
+def api_cool_put(body: dict = Body(...)):
+    save_settings(cool_mode=bool(body.get("cool", True)))
+    return {"cool": system.cool_mode(), "groq": story.online_on()}
+
+
+@app.get("/api/autopilot")
+def api_autopilot_status():
+    return {"prefs": campaigns.prefs(), "status": _ap_status()}
+
+
+@app.on_event("startup")
+def _start_autopilot():
+    try:
+        autopilot_apply()
     except Exception:
         traceback.print_exc()
 
@@ -1256,8 +1560,18 @@ def list_reels(day: str):
                         "progress": JOBS.get(rid(d), {}).get("progress"),
                         "rendering": JOBS.get(rid(d), {}).get("render"),
                         "render_progress": JOBS.get(rid(d), {}).get("render_progress"),
-                        "render_phase": JOBS.get(rid(d), {}).get("render_phase")})
+                        "render_phase": JOBS.get(rid(d), {}).get("render_phase"),
+                        "thumb": _thumb(d, p)})
     return out
+
+
+def _thumb(d: Path, p: dict):
+    """A video to show as the reel's picture on the home page: the final export, else the newest preview."""
+    fin = next(iter(sorted(d.glob("FINAL-*.mp4"))), None)
+    if fin:
+        return fin.name
+    drafts = p.get("drafts") or []
+    return drafts[-1]["file"] if drafts and (d / drafts[-1]["file"]).is_file() else None
 
 
 @app.post("/api/days/{day}/export-all")
@@ -1310,6 +1624,8 @@ def apply_layout_all(day: str, reel: str):
         with LOCK:
             q = load(o)
             q["crops"] = {"layout": c["layout"], "keyframes": [dict(k0)], "edited": True, "preset": c.get("preset")}
+            if c.get("circle"):
+                q["crops"]["circle"] = dict(c["circle"])
             q.setdefault("caption_style", {})["y"] = None   # captions follow the new webcam line
             save(o, q)
         updated.append({"folder": o.name, "had_final": bool(q.get("final"))})
@@ -1447,7 +1763,7 @@ def create_reels(day: str, body: dict = Body(...)):
         d.mkdir()
         p = {"version": 2, "name": scen[:60] or f"Reel {n}", "day": day, "created": time.time(), "source": source,
              "ranges": rngs, "scenario": scen, "creator": creator, "target": target, "state": "queued", "log": [],
-             "auto_export": auto_export,
+             "auto_export": auto_export, "campaign": body.get("campaign") or None,
              "batch": batch, "batch_index": bi, "window": win if bi is not None else None,
              "batch_info": {"scenarios": scenarios, "count": sum(1 for j in jobs if j[2] is not None and len(j) == 3)},
              "caption_style": {"size": 80, "caps": True, "hook_size": 70, "highlight": "#FFE600", "hook_color": "#FF5FA2"}}
@@ -1508,15 +1824,74 @@ def cancel_reel(day: str, reel: str):
     return {"ok": True}
 
 
+KEEP_DELETED_DAYS = 14
+
+
+def deleted_dir() -> Path:
+    from .config import DATA_DIR
+    d = DATA_DIR / "recently-deleted"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 @app.delete("/api/reel/{day}/{reel}")
 def delete_reel(day: str, reel: str):
+    """Not gone for good: the reel moves to Recently deleted, where one click brings it back."""
+    import shutil
     d = reel_dir(day, reel)
     media.cancel(rid(d))
     if JOBS.get(rid(d), {}).get("render"):
         raise HTTPException(409, "Wait for the render to finish, then delete.")
-    trash(d)
+    did = time.strftime("%Y%m%d-%H%M%S") + "-" + analysis.uid()[:4]
+    box = deleted_dir() / did
+    box.mkdir()
+    write_json(box / "deleted.json", {"day": day, "folder": reel, "name": load(d).get("name") or reel, "time": time.time()})
+    try:
+        shutil.move(str(d), str(box / reel))
+    except Exception as e:
+        shutil.rmtree(box, ignore_errors=True)
+        raise HTTPException(500, f"Couldn't delete it: {str(e)[:200]}")
     JOBS.pop(rid(d), None)
-    return {"ok": True}
+    return {"ok": True, "id": did}
+
+
+@app.get("/api/deleted")
+def list_deleted():
+    out = []
+    for b in sorted(deleted_dir().iterdir(), reverse=True):
+        info = read_json(b / "deleted.json", None) if b.is_dir() else None
+        if info:
+            out.append({"id": b.name, **info})
+    return {"deleted": out, "keep_days": KEEP_DELETED_DAYS}
+
+
+@app.post("/api/deleted/{did}/restore")
+def restore_deleted(did: str):
+    import shutil
+    b = deleted_dir() / safe_name(did)
+    info = read_json(b / "deleted.json", None)
+    if not info or not (b / info["folder"]).is_dir():
+        raise HTTPException(404, "That reel isn't in Recently deleted any more.")
+    dd = reels_root() / info["day"]
+    dd.mkdir(parents=True, exist_ok=True)
+    dest = dd / info["folder"]
+    if dest.exists():   # a reel with that name was made since: keep both
+        dest = dd / f"{info['folder']}-restored-{time.strftime('%H%M%S')}"
+    shutil.move(str(b / info["folder"]), str(dest))
+    shutil.rmtree(b, ignore_errors=True)
+    return {"ok": True, "day": info["day"], "folder": dest.name}
+
+
+@app.on_event("startup")
+def _purge_deleted():
+    """Reels deleted more than two weeks ago go to the system Trash (still recoverable there)."""
+    try:
+        for b in deleted_dir().iterdir():
+            info = read_json(b / "deleted.json", None) if b.is_dir() else None
+            if info and time.time() - info.get("time", 0) > KEEP_DELETED_DAYS * 86400:
+                trash(b)
+    except Exception:
+        traceback.print_exc()
 
 
 @app.delete("/api/reel/{day}/{reel}/draft/{name}")
@@ -1809,7 +2184,7 @@ def start_render(day: str, reel: str, final: bool = Body(False, embed=True)):
         raise HTTPException(409, "Already rendering this reel.")
     if load(d).get("state") != "ready":
         raise HTTPException(409, "This reel isn't ready yet.")
-    queue_render(d, final)
+    queue_render(d, final, urgent=True)
     return {"ok": True}
 
 
@@ -1832,6 +2207,8 @@ def save_preset(body: dict = Body(...)):
         raise HTTPException(400, "Give the preset a name.")
     pr = presets()
     pr["presets"][name] = {"layout": body["layout"], "face": body["face"], "game": body["game"]}
+    if body.get("circle"):
+        pr["presets"][name]["circle"] = body["circle"]
     if body.get("channel"):
         pr["channel_default"][body["channel"]] = name
     write_json(PRESETS_FILE, pr)

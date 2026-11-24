@@ -1,6 +1,7 @@
 """Getting footage: YouTube section fetch (with full-download fallback) and local files."""
 from __future__ import annotations
 
+from .config import first_line
 import json
 import subprocess
 import threading
@@ -174,8 +175,10 @@ def run(cmd: list[str], cwd: Path | None = None, timeout: float | None = None, o
     check_cancel()
     tag = getattr(CTX, "tag", None)
     from . import system
-    pr = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                          encoding="utf-8", errors="replace", bufsize=1, creationflags=system.NO_WINDOW)
+    heavy = bool(cmd) and Path(str(cmd[0])).name.split(".")[0] in ("ffmpeg", "yt-dlp")
+    pr = subprocess.Popen(system.gentle(cmd) if heavy else cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          text=True, encoding="utf-8", errors="replace", bufsize=1,
+                          creationflags=system.gentle_flags() if heavy else system.NO_WINDOW)
     PROCS.setdefault(tag, set()).add(pr)
     try:
         if on_line is None:
@@ -553,7 +556,7 @@ def fetch_youtube_piece(url: str, start: float, end: float, dst: Path, log) -> d
             raise
         except Exception as e:
             method = "section"
-            log(f"Direct fetch didn't work ({str(e).splitlines()[0][:100]}); trying yt-dlp sections…")
+            log(f"Direct fetch didn't work ({first_line(e)[:100]}); trying yt-dlp sections…")
             ytdlp_download([tool("yt-dlp"), "--no-playlist", "-f", f"{FORMAT_HLS}/{FORMAT}", "--merge-output-format", "mp4",
                             "--download-sections", f"*{a:.2f}-{b:.2f}", "--force-keyframes-at-cuts",
                             "--no-part", "-o", str(raw) + ".%(ext)s", url],
@@ -573,8 +576,8 @@ def fetch_youtube_piece(url: str, start: float, end: float, dst: Path, log) -> d
             raise MediaError("Couldn't fetch just this part from the site right now (it refused the fast methods), and the "
                              "app won't download the whole " + (f"{vid_len / 3600:.1f}-hour " if vid_len else "") +
                              "video to cut a clip. Click “Try again” in a minute; if it keeps failing, update the "
-                             "downloader by running Setup again.\n\nDetails: " + str(e).splitlines()[-1][:300])
-        log(f"Section fetch didn't work ({str(e).splitlines()[0][:120]}). It's a short video, so downloading it whole and trimming locally…")
+                             "downloader by running Setup again.\n\nDetails: " + first_line(e, last=True)[:300])
+        log(f"Section fetch didn't work ({first_line(e)[:120]}). It's a short video, so downloading it whole and trimming locally…")
         method = "full"
         full = dst.parent / "full-source"
         for f in dst.parent.glob("full-source.*"):

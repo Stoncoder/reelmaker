@@ -8,13 +8,16 @@
 </head>
 <body>
 <header>
-  <a href="#" id="homeLink" class="brand">🎬 Reelmaker</a>
+  <a href="#" id="homeLink" class="brand"><span class="logo">R</span><span>Reelmaker</span></a>
+  <nav class="mainNav">
+    <a href="#" id="navHome" class="navLink on">🎬 My reels</a>
+    <button id="liveBtn" class="navLink" title="See who's live on YouTube, Twitch and Kick and clip their streams"><span class="liveDot"></span> Live</button>
+  </nav>
   <div class="dayPick">
-    <select id="daySel" title="Day folder"></select>
-    <button id="liveBtn" class="small liveBtn" title="See who's live on YouTube, Twitch and Kick and clip their streams">🔴 Live</button>
+    <label class="dayBox" title="Day folder — your reels are grouped by day"><span>📁</span><select id="daySel"></select></label>
     <button id="newDayBtn" class="ghost small">+ New day</button>
-    <button id="restartBtn" class="ghost small" title="Restart Reelmaker — loads updates. Your edits are saved first.">⟳ Restart</button>
     <button id="updateBtn" class="small update hidden" title="A newer Reelmaker is available">⬆ Update</button>
+    <button id="restartBtn" class="ghost small iconBtn" title="Restart Reelmaker — loads updates. Your edits are saved first.">⟳</button>
   </div>
   <div id="usageBar" class="usageBar hidden">
     <a id="ubTask" class="ubTask" href="#"><span id="ubLabel"></span><span class="bar small"><i id="ubTaskBar"></i></span><span id="ubPct" class="ubNum"></span></a>
@@ -27,10 +30,12 @@
 </header>
 
 <main id="home" class="view">
-  <section class="card narrow">
-    <h2>Make reels</h2>
-
-    <label class="lbl">1. Video</label>
+  <section class="hero narrow">
+    <h1>Turn a stream into reels</h1>
+    <p>Paste a link, pick how to find the moments, and Reelmaker cuts, captions and exports them for you.</p>
+  </section>
+  <section class="card narrow makeCard">
+    <label class="lbl step"><i>1</i> Which video?</label>
     <div class="seg2">
       <label><input type="radio" name="srcType" value="youtube" checked><span>YouTube link</span></label>
       <label><input type="radio" name="srcType" value="file"><span>File on my Mac</span></label>
@@ -38,7 +43,7 @@
     <div id="ytRow" class="row"><input id="urlIn" placeholder="https://www.youtube.com/watch?v=…" class="grow"></div>
     <div id="fileRow" class="row hidden"><input id="pathIn" placeholder="Choose a video file" class="grow"><button id="pickBtn">Choose…</button></div>
 
-    <label class="lbl">2. Clips</label>
+    <label class="lbl step"><i>2</i> Which moments?</label>
     <div class="seg2">
       <label><input type="radio" name="clipMode" value="auto" checked><span>✨ Auto-find best clips</span></label>
       <label><input type="radio" name="clipMode" value="mine"><span>⏱ My timestamps / moments</span></label>
@@ -48,7 +53,7 @@
         <label>How many reels?<input id="countIn" type="number" min="1" max="10" value="3" class="num"></label>
         <label>Search only between <input id="winA" placeholder="5:00:00" class="short"> and <input id="winB" placeholder="5:30:00" class="short"></label>
       </div>
-      <p class="hint">Optional window — for long streams it's much faster than scanning the whole video.</p>
+      <p class="hint">Search window is optional — great for long streams.</p>
     </div>
     <div id="mineRow" class="hidden">
     <label class="lbl hint">One reel per line · timestamps, a description, or both</label>
@@ -56,25 +61,20 @@
     <div id="momentPreview" class="mlist"></div>
     </div>
 
-    <div class="row gap">
+    <label class="lbl step"><i>3</i> Options</label>
+    <div class="row gap opts">
       <label>Creator <input id="creatorIn" placeholder="Speed" class="short"></label>
       <label title="Each reel's final MP4 is exported automatically as soon as it's ready — no clicking through reels. You can still edit and export again."><input type="checkbox" id="autoExport" checked> Export final MP4s automatically</label>
       <label>Length <select id="targetSel"><option value="0" selected>✨ Auto (best length)</option><option value="20">~20s</option><option value="30">~30s</option><option value="45">~45s</option><option value="60">~60s</option></select></label>
     </div>
 
     <div id="planSummary" class="summary"></div>
-    <button id="createBtn" class="primary big">Make my reels</button>
+    <button id="createBtn" class="primary big">✨ Make my reels</button>
   </section>
 
-  <section class="card narrow">
-    <div class="row"><h2 class="grow" style="margin:0">🧹 Remove metadata from any video</h2><button id="cleanBtn">Choose a video…</button></div>
-    <p class="hint">Makes a cleaned copy (“name-clean.mp4”) next to the original and checks it with exiftool. Your reel exports are cleaned automatically.</p>
-    <div id="cleanResult"></div>
-  </section>
-
-  <section class="card narrow">
+  <section class="reelsSection">
     <div class="reelsHead">
-      <h2>Reels in <span id="dayName"></span></h2>
+      <h2>Your reels <span class="dayChip">📁 <span id="dayName"></span></span></h2>
       <div class="row">
         <button id="rehookBtn" class="ghost small hidden" title="Write new hooks for every reel in this day. Reels where you typed your own hook keep it.">✨ Rewrite hooks</button>
         <button id="retryAllBtn" class="ghost small hidden"></button>
@@ -82,35 +82,84 @@
       </div>
     </div>
     <div id="reelList" class="reelList"></div>
+    <details id="deletedBox" class="card soft hidden">
+      <summary>🗑 Recently deleted <span id="deletedCount" class="hint"></span></summary>
+      <p class="hint">Deleted reels wait here for 14 days. Click Restore to bring one back exactly as it was.</p>
+      <div id="deletedList"></div>
+    </details>
   </section>
+
+  <details class="card narrow soft toolCard">
+    <summary>🧹 Remove metadata from any video</summary>
+    <div class="row"><p class="hint grow" style="margin:0">Makes a cleaned copy (“name-clean.mp4”) next to the original and checks it with exiftool. Your reel exports are already cleaned automatically.</p><button id="cleanBtn">Choose a video…</button></div>
+    <div id="cleanResult"></div>
+  </details>
   <p id="versionLine" class="versionLine hint"><span id="versionText">Reelmaker</span> · <a href="#" id="checkUpdBtn">Check for updates</a></p>
 </main>
 
 <main id="live" class="view hidden">
-  <section class="card">
-    <div class="row"><h2 class="grow" style="margin:0">🔴 Live now</h2>
-      <span id="liveChecked" class="hint"></span>
-      <button id="liveRefresh" class="small">↻ Check again</button>
+  <div class="pageHead">
+    <div><h1>Live</h1><p class="sub">Clip streams while they're happening.</p></div>
+    <div class="row"><span id="liveChecked" class="hint"></span>
+      <button id="liveRefresh" class="small">↻ Refresh</button>
       <button id="liveEdit" class="ghost small">Edit creators</button></div>
-    <p class="hint">Your creators who are live on YouTube, Twitch and Kick right now. Pick a stream → the app finds its best moments → you tick the ones you want → they're clipped into reels. It only checks when this page is open. Always follow each creator's clipping rules.</p>
-    <div class="autoBox">
-      <b>🤖 Auto-clip a live stream</b> <span class="hint">— hands-free: it checks the stream every 10 minutes, picks the best moments, edits them and exports the MP4s by itself, until the stream ends or you stop it.</span>
-      <div class="row gap">
-        <input id="watchUrl" class="grow" placeholder="Paste any live link (YouTube, Twitch or Kick) — or use 🤖 Auto-clip on a stream below">
-        <label>Reels per hour <select id="watchRate"><option value="2">2</option><option value="4" selected>4</option><option value="6">6</option><option value="8">8</option></select></label>
-        <button id="watchGo" class="primary">🤖 Start auto-clipping</button>
-      </div>
-      <div id="watchList"></div>
+  </div>
+
+  <section id="creatorEdit" class="card hidden">
+    <h2>Your creators</h2>
+    <p class="sub">One per line: <b>Name | YouTube handle | Twitch name | Kick name</b>. Leave a part empty if they're not on that site.</p>
+    <textarea id="creatorsIn" rows="8" class="mono"></textarea>
+    <div class="row"><button id="creatorSave" class="small primary">Save</button><button id="creatorReset" class="ghost small">Reset to built-in list</button></div>
+  </section>
+
+  <section class="card apCard">
+    <div class="secHead">
+      <div class="secIcon">🤖</div>
+      <div class="grow"><h2>Auto-pilot</h2><p class="sub">Clips paid campaigns and your favourite creators by itself the moment they go live. Leave Reelmaker open.</p></div>
+      <label class="switch" title="Turn Auto-pilot on or off"><input type="checkbox" id="apOn"><span></span></label>
     </div>
-    <div id="creatorEdit" class="hidden">
-      <p class="hint">One creator per line: <b>Name | YouTube handle | Twitch name | Kick name</b> (leave a part empty if they're not on that platform).</p>
-      <textarea id="creatorsIn" rows="8" class="mono"></textarea>
-      <div class="row"><button id="creatorSave" class="small primary">Save</button><button id="creatorReset" class="ghost small">Reset to built-in list</button></div>
+    <div class="apRow">
+      <label class="selWrap">Reels go into <select id="apDay"></select></label>
+      <label class="selWrap">Reels / hour <select id="apRate"><option value="2">2</option><option value="4">4</option><option value="6">6</option><option value="8">8</option></select></label>
     </div>
+    <div class="apFavs"><span class="hint">Always clip, even with no paid campaign:</span><div id="apFavs" class="favChips"></div></div>
+    <div id="apStatus" class="apStatus"></div>
+    <div class="coolRow">
+      <div class="grow"><b>🌡 Cool mode</b> <span class="hint">Uses the Mac's video chip and low priority for exports and downloads, so your laptop stays cooler over long sessions. Turn off only for the very highest export quality.</span>
+        <div id="coolTip" class="hint"></div></div>
+      <label class="switch" title="Cool mode"><input type="checkbox" id="coolOn"><span></span></label>
+    </div>
+  </section>
+
+  <section class="card autoCard">
+    <div class="secHead">
+      <div class="secIcon">⚡</div>
+      <div><h2>Auto-clip</h2><p class="sub">Paste a live link. Every 10 minutes Reelmaker picks the best moment and exports a finished reel. No clicking needed.</p></div>
+    </div>
+    <div class="autoForm">
+      <input id="watchUrl" placeholder="Paste a YouTube, Twitch or Kick live link">
+      <label class="selWrap" title="How many reels to make per hour of stream">Reels / hour <select id="watchRate"><option value="2">2</option><option value="4" selected>4</option><option value="6">6</option><option value="8">8</option></select></label>
+      <button id="watchGo" class="primary">Start auto-clip</button>
+    </div>
+    <div id="watchList" class="watchList"></div>
+  </section>
+
+  <section class="liveSection">
+    <div class="secTitle">💰 Paid campaigns <span id="campCount" class="count"></span>
+      <span class="hint">from Content Rewards</span><span class="grow"></span>
+      <button id="campRefresh" class="ghost small" title="Check Content Rewards again">↻ Refresh</button></div>
+    <div id="campList" class="campList"><p class="empty">Loading campaigns…</p></div>
+  </section>
+
+  <section class="liveSection">
+    <div class="secTitle"><span class="liveDot"></span> Live now <span id="liveCount" class="count"></span></div>
     <div id="liveGrid" class="liveGrid"></div>
-    <div id="liveOffline" class="hint"></div>
-    <h3 style="margin-top:18px">📅 Coming up <span class="hint" id="soonNote"></span></h3>
-    <div id="soonGrid" class="liveGrid"><p class="hint">Looking for scheduled streams…</p></div>
+    <div id="liveOffline" class="offline"></div>
+  </section>
+
+  <section class="liveSection">
+    <div class="secTitle">📅 Coming up <span id="soonNote" class="hint"></span></div>
+    <div id="soonGrid" class="liveGrid"><p class="empty">Looking for scheduled streams…</p></div>
   </section>
 
   <section id="liveFind" class="card hidden">
@@ -134,34 +183,45 @@
 
 <main id="editor" class="view hidden">
   <div class="reelNav">
-    <button id="prevReel" class="ghost small">← Previous</button>
-    <select id="reelPick" title="Jump to any reel in this day folder"></select>
-    <button id="nextReel" class="ghost small">Next reel →</button>
+    <button id="backBtn" class="backBtn" title="Back to all your reels">← <span id="backLbl">My reels</span></button>
+    <div class="reelSwitch">
+      <button id="prevReel" class="iconBtn" title="Previous reel">‹</button>
+      <select id="reelPick" title="Jump to any reel in this day folder"></select>
+      <button id="nextReel" class="iconBtn" title="Next reel">›</button>
+    </div>
     <span id="reelPos" class="hint"></span>
     <button id="nextTodo" class="small hidden"></button>
   </div>
   <div class="edHead">
     <input id="reelName" class="titleIn">
-    <div class="row"><span id="durBadge" class="badge"></span><span id="saveState" class="hint"></span><button id="openFolder" class="ghost small">Open folder</button><button id="delReel" class="ghost small danger">Delete reel</button></div>
+    <div class="row"><span id="saveState" class="hint"></span><span id="durBadge" class="badge"></span>
+      <details class="menu"><summary class="iconBtn" title="More">⋯</summary>
+        <div class="menuPop"><button id="openFolder">📂 Open folder in Finder</button><button id="delReel" class="danger">🗑 Delete this reel</button></div></details></div>
   </div>
   <div id="statusBox" class="card status"></div>
+  <div id="campBanner" class="campBanner hidden"></div>
 
   <div id="edBody" class="edGrid hidden">
     <!-- left: the reel itself -->
-    <div class="phoneCol">
+    <div class="phoneCol card">
+      <div class="phoneHead"><b>Your reel</b><button id="fsBtn" class="ghost small" title="Watch full screen (with the hook and captions)">⛶ Full screen</button></div>
+      <div id="phoneStage" class="phoneStage">
       <div id="phoneWrap" class="phoneWrap">
-        <video id="draftV" class="phone" controls playsinline></video>
+        <video id="draftV" class="phone" controls playsinline controlslist="nofullscreen" disablepictureinpicture></video>
         <div class="capLayer">
           <div id="liveHook" class="liveHook hidden"></div>
           <div id="liveCap" class="liveCap hidden" title="Drag up or down to move the captions"></div>
           <div id="capGuide" class="capGuide" title="Drag up or down to move the captions"><span id="capGuideTxt">⇕ drag to move captions</span></div>
+          <div id="circGuide" class="circGuide hidden" title="Drag to move the round facecam · drag the dot to resize"><i></i></div>
         </div>
       </div>
+      <button id="fsExit" class="fsExit" title="Leave full screen (Esc)">✕</button>
+      </div>
       <div id="staleNote" class="stale hidden">You changed something — click Update preview to see and hear it in the reel.</div>
-      <div class="row center"><button id="draftBtn" class="primary">↻ Update preview</button></div>
+      <div class="row center"><button id="draftBtn" class="primary wide">↻ Update preview</button></div>
       <div id="draftProg" class="hint center"></div>
       <div id="draftBar" class="bar hidden"><i></i></div>
-      <div class="row center"><button id="finalBtn">Export final MP4</button></div>
+      <div class="row center"><button id="finalBtn" class="export wide">⬇ Export final MP4</button></div>
       <div id="finalProg" class="hint center"></div>
       <div id="finalBar" class="bar hidden"><i></i></div>
       <div id="finalBox"></div>
@@ -171,10 +231,10 @@
     <!-- right: what you can change -->
     <div class="tabCol">
       <nav class="tabs">
-        <button data-tab="cut" class="on">Story</button>
-        <button data-tab="crops">Layout</button>
-        <button data-tab="hook">Hook</button>
-        <button data-tab="caps">Captions</button>
+        <button data-tab="cut" class="on"><i>1</i> Cut</button>
+        <button data-tab="crops"><i>2</i> Layout</button>
+        <button data-tab="hook"><i>3</i> Hook</button>
+        <button data-tab="caps"><i>4</i> Captions</button>
       </nav>
 
       <div id="srcCol" class="card">
@@ -184,11 +244,13 @@
           <video id="srcV" playsinline preload="auto" crossorigin="anonymous"></video>
           <div id="boxFace" class="cropBox face hidden"><span>WEBCAM</span><i></i></div>
           <div id="boxGame" class="cropBox game hidden"><span>GAMEPLAY</span><i></i></div>
+          <div id="boxCircle" class="cropBox circ hidden"><span>FACE</span><i></i></div>
         </div>
         <div id="timeline" class="timeline"></div>
       </div>
 
       <section data-pane="cut" class="card pane">
+        <p class="paneIntro"><b>Cut</b> — choose which parts of the clip stay in the reel. Play it above, untick what's boring.</p>
         <div id="storyNote" class="note"></div>
         <h3>Parts in the reel <span class="hint">untick to drop a part</span></h3>
         <div id="segList"></div>
@@ -203,10 +265,19 @@
       </section>
 
       <section data-pane="crops" class="card pane hidden">
+        <p class="paneIntro"><b>Layout</b> — how the 9:16 reel is framed: webcam, gameplay and an optional round facecam.</p>
         <div class="row"><select id="layoutSel"><option value="split">Webcam top · gameplay bottom (zoomed in)</option><option value="splitfit">Webcam top · whole game screen (menus, wide shots)</option><option value="gameonly">Gameplay only</option></select>
           <button id="applyAll" class="small" title="Copy this layout to every reel in this day folder made from the same video">Use this layout for all reels from this video</button></div>
         <div id="noCam" class="note hidden">No webcam was found automatically. <button id="markCam" class="small">Mark the webcam myself</button></div>
         <p class="hint">Drag the boxes on the video above to move them; drag a corner to resize. The blue box is what goes in the top half.</p>
+        <div class="circBox">
+          <label class="chk"><input type="checkbox" id="circOn"> <b>Round facecam</b> <span class="hint">the creator's face in a circle, anywhere on the reel</span></label>
+          <div id="circOpts" class="hidden">
+            <div class="row"><label class="hint">Size <input type="range" id="circSize" min="0.18" max="0.7" step="0.01"></label>
+              <button id="circFace" class="ghost small" title="Put the red circle on the webcam box">Find the face</button></div>
+            <p class="hint">Drag the red <b>FACE</b> circle on the video above onto the face. Drag the circle in the reel (here or on the left) to move it anywhere.</p>
+          </div>
+        </div>
         <canvas id="pv" width="270" height="480"></canvas>
         <div class="row"><input id="presetName" placeholder="Name this layout, e.g. Speed stream" class="grow"><button id="savePreset" class="small">Save layout</button></div>
         <label class="hint chk" id="chanLbl"><input type="checkbox" id="chanDefault" checked> Use it automatically next time</label>
@@ -221,6 +292,7 @@
       </section>
 
       <section data-pane="hook" class="card pane hidden">
+        <p class="paneIntro"><b>Hook</b> — the text and voice in the first seconds that make people stop scrolling.</p>
         <label class="chk"><input type="checkbox" id="hookOn"> Opening hook</label>
         <label class="lbl">Your idea or rough hook <span class="hint">optional — context, a joke, or a line to polish</span></label>
         <textarea id="hookIdea" rows="2" placeholder="e.g. he waited 3 days for this · Speed loses it when Vice City finally opens"></textarea>
@@ -282,6 +354,7 @@
       </section>
 
       <section data-pane="caps" class="card pane hidden">
+        <p class="paneIntro"><b>Captions</b> — their colour and size. Drag them up or down on the reel to move them.</p>
         <label class="lbl">Highlight colour</label>
         <div id="hlSwatches" class="swatches"></div>
         <label class="lbl">Hook second-line colour</label>

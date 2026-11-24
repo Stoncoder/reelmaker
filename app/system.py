@@ -128,6 +128,51 @@ def reveal(path: Path | str, select: bool = True) -> None:
         subprocess.run(["xdg-open", str(Path(p).parent if select else p)])
 
 
+def on_battery() -> bool:
+    """Is the laptop running on battery? (macOS; False when unknown.)"""
+    if not IS_MAC:
+        return False
+    try:
+        out = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True, timeout=5).stdout
+        return "Battery Power" in out
+    except Exception:
+        return False
+
+
+def cool_mode() -> bool:
+    """Cool mode (default on): heavy jobs use the hardware video engine and run at low priority, so the
+    computer stays cooler and quieter. Off = maximum quality / speed, everything at full power."""
+    try:
+        from .config import settings
+        return settings().get("cool_mode", True) is not False
+    except Exception:
+        return True
+
+
+def gentle(cmd: list) -> list:
+    """Run a heavy tool at low priority in cool mode. macOS: the 'utility' QoS clamp (prefers the efficiency
+    cores, lower clocks: much less heat). Linux: nice. Windows: see gentle_flags()."""
+    if not cool_mode() or not cmd:
+        return cmd
+    if IS_MAC and Path("/usr/sbin/taskpolicy").exists():
+        return ["/usr/sbin/taskpolicy", "-c", "utility", *cmd]
+    if not IS_WIN:
+        return ["nice", "-n", "10", *cmd]
+    return cmd
+
+
+def gentle_flags() -> int:
+    """Windows: start heavy tools below normal priority in cool mode."""
+    if IS_WIN and cool_mode():
+        return NO_WINDOW | 0x00004000      # BELOW_NORMAL_PRIORITY_CLASS
+    return NO_WINDOW
+
+
+def hw_decode() -> list:
+    """Let the hardware decode the video (Mac: VideoToolbox) instead of the CPU, in cool mode."""
+    return ["-hwaccel", "videotoolbox"] if (IS_MAC and cool_mode()) else []
+
+
 def trash(path: Path) -> None:
     """Move to the Trash / Recycle Bin (recoverable), never delete outright. Raises OSError on failure."""
     if IS_MAC:

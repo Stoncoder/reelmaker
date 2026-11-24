@@ -210,14 +210,40 @@ def _px(c: dict, W: int, H: int):
     return w, h, x, y
 
 
+def face_circle(p):
+    """The round facecam bubble, if it's switched on: {"src": box on the source (square in pixels),
+    "x","y": its centre on the reel (0-1), "d": its diameter as a share of the reel's width}."""
+    c = (p.get("crops") or {}).get("circle")
+    return c if c and c.get("on") and c.get("src") else None
+
+
+def _circle_px(c: dict, W: int, H: int):
+    """Source square (pixels) + where the bubble goes on the reel: (sw, sx, sy, D, ox, oy, ring)."""
+    sw = max(16, int(round(min(c["src"]["w"] * W, c["src"]["h"] * H) / 2) * 2))
+    sx = min(max(0, int(round(c["src"]["x"] * W))), W - sw)
+    sy = min(max(0, int(round(c["src"]["y"] * H))), H - sw)
+    D = max(120, min(OUT_W, int(round(float(c.get("d", 0.36)) * OUT_W / 2) * 2)))
+    ring = max(4, D // 45)
+    ox = int(round(min(max(0.0, float(c.get("x", 0.5)) * OUT_W - D / 2), OUT_W - D)))
+    oy = int(round(min(max(0.0, float(c.get("y", 0.5)) * OUT_H - D / 2), OUT_H - D)))
+    return sw, sx, sy, D, ox, oy, ring
+
+
 def build_graph(p, items, fps, vo_index, vo_dur, final):
     g = []
     layout = p["crops"]["layout"]
+    circ = face_circle(p)
     for i, it in enumerate(items):
         pc = p["pieces"][it["piece"]]
         W, H = pc["width"], pc["height"]
         d = it["end"] - it["start"]
         gw, gh, gx, gy = _px(it["crop"]["game"], W, H)
+        if circ:   # one more copy of the source for the bubble; the layout below then works on [in{i}]
+            g.append(f"[{i}:v]setpts=PTS-STARTPTS,format=yuv420p,split=2[in{i}][ci{i}]")
+            src, out = f"[in{i}]null", f"u{i}"
+        else:
+            # format=yuv420p first: hardware-decoded frames arrive as nv12, which some filters mishandle
+            src, out = f"[{i}:v]setpts=PTS-STARTPTS,format=yuv420p", f"v{i}"
         if layout in SPLITS:
             fw, fh, fx, fy = _px(it["crop"]["face"], W, H)
             top = split_top(it["crop"]["face"], W, H)
@@ -226,27 +252,41 @@ def build_graph(p, items, fps, vo_index, vo_dur, final):
                 sw, sh = OUT_W, int(round(OUT_W * fh / fw / 2) * 2)
             else:                       # tall webcam: full height
                 sw, sh = int(round(top * fw / fh / 2) * 2), top
-            g.append(f"[{i}:v]setpts=PTS-STARTPTS,split=2[a{i}][b{i}]")
+            g.append(f"{src},split=2[a{i}][b{i}]")
             g.append(f"[a{i}]crop={fw}:{fh}:{fx}:{fy},split=2[c{i}][d{i}]")
-            g.append(f"[c{i}]scale={OUT_W}:{top}:force_original_aspect_ratio=increase,crop={OUT_W}:{top},boxblur=20:2,eq=brightness=-0.15,setsar=1[cb{i}]")
+            q4 = top // 4 // 2 * 2
+            g.append(f"[c{i}]scale={OUT_W // 4}:{q4}:force_original_aspect_ratio=increase:flags=fast_bilinear,crop={OUT_W // 4}:{q4},"
+                     f"boxblur=5:2,scale={OUT_W}:{top}:flags=bilinear,eq=brightness=-0.15,setsar=1[cb{i}]")
             g.append(f"[d{i}]scale={sw}:{sh}:flags=lanczos,setsar=1[cf{i}]")
             g.append(f"[cb{i}][cf{i}]overlay={(OUT_W - sw) // 2}:{(top - sh) // 2}[f{i}]")
             if layout == "splitfit":   # the whole game screen, uncropped, over a blurred fill of itself
                 fh2 = int(round(OUT_W * H / W / 2) * 2)
                 g.append(f"[b{i}]split=2[gb{i}][gf{i}]")
-                g.append(f"[gb{i}]scale=-2:{area},crop={OUT_W}:{area},boxblur=24:2,eq=brightness=-0.15,setsar=1[gbb{i}]")
+                g.append(f"[gb{i}]scale=-2:{area // 4 // 2 * 2}:flags=fast_bilinear,crop={OUT_W // 4}:{area // 4 // 2 * 2},"
+                         f"boxblur=6:2,scale={OUT_W}:{area}:flags=bilinear,eq=brightness=-0.15,setsar=1[gbb{i}]")
                 g.append(f"[gf{i}]scale={OUT_W}:{fh2}:flags=lanczos,setsar=1[gff{i}]")
                 g.append(f"[gbb{i}][gff{i}]overlay=0:{(area - fh2) // 2}[g{i}]")
             else:
                 cw, ch, cx, cy = fit_game(it["crop"]["game"], W, H, area)
                 g.append(f"[b{i}]crop={cw}:{ch}:{cx}:{cy},scale={OUT_W}:{area}:flags=lanczos,setsar=1[g{i}]")
-            g.append(f"[f{i}][g{i}]vstack=2,fps={fps},format=yuv420p[v{i}]")
+            g.append(f"[f{i}][g{i}]vstack=2,fps={fps},format=yuv420p[{out}]")
         else:  # gameplay only: cropped gameplay in the middle over a blurred fill
-            g.append(f"[{i}:v]setpts=PTS-STARTPTS,split=2[a{i}][b{i}]")
-            g.append(f"[a{i}]scale=-2:{OUT_H},crop={OUT_W}:{OUT_H},boxblur=24:2,eq=brightness=-0.12,setsar=1[bg{i}]")
+            g.append(f"{src},split=2[a{i}][b{i}]")
+            g.append(f"[a{i}]scale=-2:{OUT_H // 4}:flags=fast_bilinear,crop={OUT_W // 4}:{OUT_H // 4},"
+                     f"boxblur=6:2,scale={OUT_W}:{OUT_H}:flags=bilinear,eq=brightness=-0.12,setsar=1[bg{i}]")
             cw, ch, cx, cy = fit_game(it["crop"]["game"], W, H, HALF_H)
             g.append(f"[b{i}]crop={cw}:{ch}:{cx}:{cy},scale={OUT_W}:{HALF_H}:flags=lanczos,setsar=1[fg{i}]")
-            g.append(f"[bg{i}][fg{i}]overlay=0:{(OUT_H - HALF_H) // 2},fps={fps},format=yuv420p[v{i}]")
+            g.append(f"[bg{i}][fg{i}]overlay=0:{(OUT_H - HALF_H) // 2},fps={fps},format=yuv420p[{out}]")
+        if circ:   # round facecam with a thin white ring, anti-aliased edges
+            sw, sx, sy, D, ox, oy, rg = _circle_px(circ, W, H)
+            R = D + 2 * rg
+            disc = lambda n: f"clip(255*({n}/2-hypot(X-{n}/2+0.5,Y-{n}/2+0.5)+0.5),0,255)"
+            g.append(f"[ci{i}]crop={sw}:{sw}:{sx}:{sy},scale={D}:{D}:flags=lanczos,fps={fps},format=yuva420p,"
+                     f"geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='{disc(D)}'[cf{i}x]")
+            g.append(f"color=c=white:s={R}x{R}:r={fps},format=yuva420p,geq=lum=235:cb=128:cr=128:a='{disc(R)}',"
+                     f"trim=end_frame=1,loop=-1:1[cr{i}x]")
+            g.append(f"[{out}][cr{i}x]overlay={ox - rg}:{oy - rg}:shortest=1[uu{i}]")
+            g.append(f"[uu{i}][cf{i}x]overlay={ox}:{oy}:shortest=1,format=yuv420p[v{i}]")
         if pc.get("has_audio", True):
             g.append(f"[{i}:a]asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo,"
                      f"afade=t=in:d=0.02,afade=t=out:st={max(0, d - 0.03):.3f}:d=0.03[a{i}x]")
@@ -309,8 +349,9 @@ def render(reel_dir: Path, p: dict, final: bool, progress=lambda f: None) -> Pat
                  "timeline": [{"piece": it["piece"], "start": round(it["start"], 3), "end": round(it["end"], 3),
                                "out": round(it["out"], 3), "kind": it["kind"]} for it in items]}
     cmd = [tool("ffmpeg"), "-y", "-v", "error", "-progress", "pipe:1", "-nostats"]
+    from .system import cool_mode, gentle, gentle_flags, hw_decode
     for it in items:
-        cmd += ["-ss", f"{it['start'] - p['pieces'][it['piece']]['offset']:.3f}",
+        cmd += [*hw_decode(), "-ss", f"{it['start'] - p['pieces'][it['piece']]['offset']:.3f}",
                 "-t", f"{it['end'] - it['start']:.3f}", "-i", f"source/{p['pieces'][it['piece']]['file']}"]
     vo_index = None
     if vo_path:
@@ -321,8 +362,17 @@ def render(reel_dir: Path, p: dict, final: bool, progress=lambda f: None) -> Pat
 
     if final:
         out = reel_dir / f"FINAL-{reel_dir.name}.mp4"
-        cmd += ["-c:v", "libx264", "-preset", "slow", "-crf", "18", "-profile:v", "high", "-level:v", "4.2",
-                "-maxrate", "16M", "-bufsize", "32M", "-g", str(fps * 2), "-pix_fmt", "yuv420p",
+        from .media import hw_encoder
+        hw = hw_encoder() if cool_mode() else None
+        if hw and hw[0] == "h264_videotoolbox":
+            # cool mode: Apple's video engine does the encode (a fraction of the heat of x264), at a high bitrate
+            # so quality stays at what Reels/TikTok re-encode from anyway
+            vcod = ["-c:v", "h264_videotoolbox", "-b:v", "14M", "-maxrate", "18M", "-bufsize", "28M",
+                    "-profile:v", "high", "-level:v", "4.2", "-g", str(fps * 2), "-pix_fmt", "yuv420p", "-allow_sw", "1"]
+        else:
+            vcod = ["-c:v", "libx264", "-preset", "slow", "-crf", "18", "-profile:v", "high", "-level:v", "4.2",
+                    "-maxrate", "16M", "-bufsize", "32M", "-g", str(fps * 2), "-pix_fmt", "yuv420p"]
+        cmd += [*vcod,
                 "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709",
                 "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
                 "-map_metadata", "-1", "-map_chapters", "-1", "-fflags", "+bitexact",
@@ -350,8 +400,8 @@ def render(reel_dir: Path, p: dict, final: bool, progress=lambda f: None) -> Pat
     import threading
     from .media import PROCS
     from .system import NO_WINDOW
-    proc = subprocess.Popen(cmd, cwd=reel_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                            encoding="utf-8", errors="replace", creationflags=NO_WINDOW)
+    proc = subprocess.Popen(gentle(cmd), cwd=reel_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            encoding="utf-8", errors="replace", creationflags=gentle_flags())
     PROCS.setdefault("render", set()).add(proc)   # so closing the app stops it too
     errs = []
     reader = threading.Thread(target=lambda: errs.append(proc.stderr.read()), daemon=True)

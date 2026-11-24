@@ -6,6 +6,7 @@ extractor for the signed segment URLs and download only the segments we need, in
 """
 from __future__ import annotations
 
+from .config import first_line
 import math
 import re
 import threading
@@ -61,21 +62,40 @@ def _pick(formats, max_height):
     return v, a
 
 
-def _stream(url: str, max_height: int) -> dict:
-    """Signed segment URLs for this stream (cached ~20 min; YouTube URLs last ~6 h)."""
+def _stream(url: str, max_height: int, tries: int = 4) -> dict:
+    """Signed segment URLs for this stream (cached ~20 min; YouTube URLs last ~6 h).
+    YouTube now and then answers with a stream that has no segments listed for a moment: ask again a few times."""
     key = f"{url}|{max_height}"
     with _lock:
         s = _cache.get(key)
         if s and time.time() - s["t"] < 1200:
             return s
+    last = None
+    for i in range(tries):
+        try:
+            return _stream_once(url, max_height, key)
+        except LiveError as e:
+            last = e
+            if "not live" in str(e) and i >= 1:
+                break
+            media.check_cancel()
+            time.sleep(3 + 3 * i)
+    raise last
+
+
+def _stream_once(url: str, max_height: int, key: str) -> dict:
     ydl = _ydl()
     info = ydl.extract_info(url, download=False)
     if info.get("live_status") not in ("is_live", "post_live"):
         raise LiveError("not live")
     v, a = _pick(info["formats"], max_height)
+    # when a stream has just ended, YouTube can list the formats with no segments left in them
+    fv = next(iter(v["fragments"]({})), None) if callable(v.get("fragments")) else None
+    fa = next(iter(a["fragments"]({})), None) if callable(a.get("fragments")) else None
+    if not fv or not fa:
+        raise LiveError("The stream isn't giving out live segments any more (it has probably just ended).")
     s = {"t": time.time(), "ydl": ydl, "info": info, "td": float(v.get("target_duration") or 5),
-         "v": next(iter(v["fragments"]({})))["url"], "a": next(iter(a["fragments"]({})))["url"],
-         "height": v.get("height"), "fps": v.get("fps")}
+         "v": fv["url"], "a": fa["url"], "height": v.get("height"), "fps": v.get("fps")}
     with _lock:
         _cache[key] = s
     return s
@@ -270,9 +290,37 @@ def stream_position(s: dict) -> float:
     import yt_dlp
     with yt_dlp.YoutubeDL(Q) as y:
         v = y.extract_info(s["clip_url"], download=False, process=False)
+    if v.get("duration") and not (v.get("is_live") or v.get("live_status") == "is_live"):
+        return float(v["duration"])
+    # live: the recording's playlist grows as the stream goes on — add up its parts (the real clippable length)
+    try:
+        n = recording_seconds(s["clip_url"])
+        if n > 0:
+            return n
+    except Exception:
+        pass
     if v.get("duration"):
         return float(v["duration"])
-    return float(s.get("uptime") or 0)
+    started = s.get("started") or v.get("timestamp") or v.get("release_timestamp")
+    if started:
+        return max(0.0, time.time() - float(started) - 90)   # the recording runs a little behind the live picture
+    raise LiveError("Couldn't tell how long this stream's recording is yet.")
+
+
+def recording_seconds(url: str) -> float:
+    """Length of a Twitch/Kick recording, from its HLS playlist (works while the stream is still running)."""
+    import yt_dlp
+    with yt_dlp.YoutubeDL(Q) as y:
+        info = y.extract_info(url, download=False)
+        fs = [f for f in info.get("formats") or [] if "m3u8" in str(f.get("protocol", ""))]
+        if not fs:
+            return float(info.get("duration") or 0)
+        f = min(fs, key=lambda f: f.get("height") or 9999)          # smallest playlist: same timeline, less to read
+        txt = y.urlopen(yt_dlp.networking.Request(f["url"], headers=f.get("http_headers") or {})).read().decode("utf-8", "replace")
+    m = re.search(r"#EXT-X-TWITCH-TOTAL-SECS:([\d.]+)", txt)
+    if m:
+        return float(m.group(1))
+    return sum(float(x) for x in re.findall(r"#EXTINF:([\d.]+)", txt))
 
 
 def resolve(url: str) -> dict:
@@ -302,7 +350,7 @@ def resolve(url: str) -> dict:
         with yt_dlp.YoutubeDL({**Q, "noplaylist": True, "ignore_no_formats_error": True}) as y:   # a specific video / live URL
             d = y.extract_info(u, download=False, process=False)
     except Exception as e:
-        msg = re.sub(r"^ERROR:\s*(\[[^\]]+\]\s*)?([\w-]+:\s*)?", "", str(e).splitlines()[0]).strip()
+        msg = re.sub(r"^ERROR:\s*(\[[^\]]+\]\s*)?([\w-]+:\s*)?", "", first_line(e)).strip()
         raise LiveError(f"Couldn't open that link: {msg[:200]}")
     if d.get("live_status") == "is_upcoming":
         starts = d.get("release_timestamp")
